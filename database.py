@@ -44,12 +44,13 @@ class Database:
     def clear_voice_channel(self, guild_id: int) -> None:
         self.client.table("voice_presence").delete().eq("guild_id", guild_id).execute()
 
-    def add_voice_session(self, guild_id: int, user_id: int, started_at: str, ended_at: str, seconds: int) -> None:
+    def add_voice_session(self, guild_id: int, user_id: int, channel_id: int, started_at: str, ended_at: str, seconds: int) -> None:
         if seconds <= 0:
             return
         self.client.table("voice_time_sessions").insert({
             "guild_id": guild_id,
             "user_id": user_id,
+            "channel_id": channel_id,
             "started_at": started_at,
             "ended_at": ended_at,
             "duration_seconds": seconds,
@@ -58,6 +59,24 @@ class Database:
             "increment_voice_time",
             {"p_guild_id": guild_id, "p_user_id": user_id, "p_seconds": seconds},
         ).execute()
+
+    def get_voice_leaderboard(self, guild_id: int, limit: int = 5) -> list[dict]:
+        response = (
+            self.client.table("voice_time")
+            .select("user_id,total_seconds")
+            .eq("guild_id", guild_id)
+            .order("total_seconds", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return getattr(response, "data", None) or []
+
+    def get_voice_room_leaderboard(self, guild_id: int, limit: int = 5) -> list[dict]:
+        response = self.client.rpc(
+            "get_voice_room_leaderboard",
+            {"p_guild_id": guild_id, "p_limit": limit},
+        ).execute()
+        return getattr(response, "data", None) or []
 
     def get_voice_time(self, guild_id: int, user_id: int) -> int:
         response = (

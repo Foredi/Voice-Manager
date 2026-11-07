@@ -38,6 +38,83 @@ def is_admin(member: discord.Member) -> bool:
     return member.guild_permissions.administrator or member.guild_permissions.manage_guild
 
 
+def format_duration(seconds: int) -> str:
+    hours, remainder = divmod(max(0, seconds), 3600)
+    minutes = remainder // 60
+    return f"{hours}h {minutes:02}m" if hours else f"{minutes}m"
+
+
+def activity_bar(seconds: int, window_seconds: int, width: int = 12) -> str:
+    filled = min(width, round(width * max(0, seconds) / window_seconds))
+    return "▰" * filled + "▱" * (width - filled)
+
+
+def build_voice_activity_embed(
+    member: discord.Member,
+    total_seconds: int,
+    periods: dict[int, int],
+) -> discord.Embed:
+    embed = discord.Embed(
+        title="Voice Activity",
+        description=f"Thống kê thời gian thoại của **{member.display_name}**",
+        color=discord.Color.from_rgb(47, 49, 54),
+    )
+    embed.set_thumbnail(url=member.display_avatar.url)
+    for days, seconds in periods.items():
+        embed.add_field(
+            name=f"{days} ngày",
+            value=f"**{seconds / 3600:.2f} giờ**\n{activity_bar(seconds, days * 86400)}",
+            inline=True,
+        )
+    embed.add_field(name="Tổng tích lũy", value=f"**{format_duration(total_seconds)}**", inline=True)
+    if member.voice and member.voice.channel:
+        voice_location = f"Đang ở {member.voice.channel.mention}"
+    else:
+        voice_location = "Hiện không ở voice"
+    embed.add_field(name="Trạng thái hiện tại", value=voice_location, inline=True)
+    embed.set_footer(text="Thời gian 1, 7 và 14 ngày là khoảng lăn tính từ hiện tại")
+    return embed
+
+
+def build_voice_leaderboard_embed(
+    guild: discord.Guild,
+    members: list[dict],
+    rooms: list[dict],
+) -> discord.Embed:
+    embed = discord.Embed(
+        title="Voice Activity • Bảng xếp hạng",
+        description="Top 5 thành viên và phòng voice theo tổng thời gian đã ghi nhận.",
+        color=discord.Color.from_rgb(47, 49, 54),
+    )
+    if guild.icon:
+        embed.set_thumbnail(url=guild.icon.url)
+
+    member_max = max((int(item["total_seconds"]) for item in members), default=1)
+    member_lines = []
+    medals = ("🥇", "🥈", "🥉", "4️⃣", "5️⃣")
+    for index, item in enumerate(members[:5]):
+        seconds = int(item["total_seconds"])
+        member_lines.append(
+            f"{medals[index]} <@{item['user_id']}> · **{format_duration(seconds)}**\n"
+            f"`{activity_bar(seconds, member_max, 10)}`"
+        )
+    embed.add_field(name="Top thành viên", value="\n".join(member_lines) or "Chưa có dữ liệu.", inline=True)
+
+    room_max = max((int(item["total_seconds"]) for item in rooms), default=1)
+    room_lines = []
+    for index, item in enumerate(rooms[:5]):
+        seconds = int(item["total_seconds"])
+        channel = guild.get_channel(int(item["channel_id"]))
+        channel_name = channel.mention if channel else f"Room đã xóa (`{item['channel_id']}`)"
+        room_lines.append(
+            f"{medals[index]} {channel_name} · **{format_duration(seconds)}**\n"
+            f"`{activity_bar(seconds, room_max, 10)}`"
+        )
+    embed.add_field(name="Top room voice", value="\n".join(room_lines) or "Chưa có dữ liệu room.", inline=True)
+    embed.set_footer(text="Thời gian được cộng từ khi tracker bắt đầu lưu phiên có room ID")
+    return embed
+
+
 async def respond(interaction: discord.Interaction, content: str, *, ephemeral: bool = True) -> None:
     if interaction.response.is_done():
         await interaction.followup.send(content, ephemeral=ephemeral)
@@ -658,6 +735,7 @@ class PermanentVoiceMaster(commands.Bot):
         self._voice_channels: dict[int, int] = {}
         self._last_room_create: dict[tuple[int, int], float] = {}
         self._voice_sessions: dict[tuple[int, int], float] = {}
+        self._voice_session_channels: dict[tuple[int, int], int] = {}
 
     def get_cached_settings(self, guild_id: int):
         # Cache is loaded when the bot becomes ready and updated by /setup.
@@ -685,6 +763,31 @@ class PermanentVoiceMaster(commands.Bot):
     async def get_voice_time(self, guild_id: int, user_id: int) -> int:
         return await asyncio.to_thread(self.db.get_voice_time, guild_id, user_id)
 
+    async def get_voice_leaderboard(self, guild_id: int, limit: int = 5) -> list[dict]:
+        rows = await asyncio.to_thread(self.db.get_voice_leaderboard, guild_id, limit)
+        totals = {int(row["user_id"]): int(row["total_seconds"]) for row in rows}
+        for (active_guild_id, user_id), started in self._voice_sessions.items():
+            if active_guild_id == guild_id:
+                totals[user_id] = totals.get(user_id, 0) + max(0, int(time.time() - started))
+        return [
+            {"user_id": user_id, "total_seconds": seconds}
+            for user_id, seconds in sorted(totals.items(), key=lambda item: item[1], reverse=True)[:limit]
+        ]
+
+    async def get_voice_room_leaderboard(self, guild_id: int, limit: int = 5) -> list[dict]:
+        rows = await asyncio.to_thread(self.db.get_voice_room_leaderboard, guild_id, max(limit, 100))
+        totals = {int(row["channel_id"]): int(row["total_seconds"]) for row in rows}
+        now = time.time()
+        for key, started in self._voice_sessions.items():
+            if key[0] == guild_id:
+                channel_id = self._voice_session_channels.get(key)
+                if channel_id:
+                    totals[channel_id] = totals.get(channel_id, 0) + max(0, int(now - started))
+        return [
+            {"channel_id": channel_id, "total_seconds": seconds}
+            for channel_id, seconds in sorted(totals.items(), key=lambda item: item[1], reverse=True)[:limit]
+        ]
+
     async def get_voice_time_periods(self, guild_id: int, user_id: int) -> dict[int, int]:
         now = time.time()
         periods: dict[int, int] = {}
@@ -709,7 +812,8 @@ class PermanentVoiceMaster(commands.Bot):
 
     async def _close_voice_session(self, guild_id: int, user_id: int) -> None:
         started = self._voice_sessions.pop((guild_id, user_id), None)
-        if started is None:
+        channel_id = self._voice_session_channels.pop((guild_id, user_id), None)
+        if started is None or channel_id is None:
             return
         ended = time.time()
         try:
@@ -717,6 +821,7 @@ class PermanentVoiceMaster(commands.Bot):
                 self.db.add_voice_session,
                 guild_id,
                 user_id,
+                channel_id,
                 datetime.fromtimestamp(started, timezone.utc).isoformat(),
                 datetime.fromtimestamp(ended, timezone.utc).isoformat(),
                 max(0, int(ended - started)),
@@ -768,7 +873,9 @@ class PermanentVoiceMaster(commands.Bot):
             for channel in guild.voice_channels:
                 for member in channel.members:
                     if not member.bot:
-                        self._voice_sessions.setdefault((guild.id, member.id), session_start)
+                        key = (guild.id, member.id)
+                        self._voice_sessions.setdefault(key, session_start)
+                        self._voice_session_channels.setdefault(key, channel.id)
 
     async def _cleanup_empty_room(self, channel: discord.abc.GuildChannel) -> None:
         if not isinstance(channel, discord.VoiceChannel):
@@ -971,6 +1078,7 @@ class PermanentVoiceMaster(commands.Bot):
                 await self._close_voice_session(*key)
             if after.channel is not None:
                 self._voice_sessions[key] = time.time()
+                self._voice_session_channels[key] = after.channel.id
 
         if before.channel is not None and before.channel != after.channel:
             # Runs for both humans and bots, so another bot leaving can trigger cleanup.
@@ -1011,6 +1119,20 @@ async def voice_time_prefix(ctx: commands.Context, member: Optional[discord.Memb
     if ctx.guild is None:
         await ctx.reply("Lệnh này chỉ dùng trong server.", mention_author=False)
         return
+    if member is None:
+        try:
+            top_members, top_rooms = await asyncio.gather(
+                bot.get_voice_leaderboard(ctx.guild.id, 5),
+                bot.get_voice_room_leaderboard(ctx.guild.id, 5),
+            )
+        except Exception as exc:
+            await report_error(f"read voice leaderboard guild {ctx.guild.id}", exc)
+            await ctx.reply("Không đọc được bảng xếp hạng voice. Kiểm tra Supabase schema đã cập nhật chưa.", mention_author=False)
+            return
+        embed = build_voice_leaderboard_embed(ctx.guild, top_members, top_rooms)
+        await ctx.reply(embed=embed, mention_author=False, allowed_mentions=discord.AllowedMentions.none())
+        return
+
     target = member or ctx.author
     try:
         total = await bot.get_voice_time(ctx.guild.id, target.id)
@@ -1021,10 +1143,9 @@ async def voice_time_prefix(ctx: commands.Context, member: Optional[discord.Memb
         return
 
     total += bot.get_live_voice_seconds(ctx.guild.id, target.id)
-    lines = [f"**{days} ngày:** {seconds / 3600:.2f} giờ" for days, seconds in periods.items()]
+    embed = build_voice_activity_embed(target, total, periods)
     await ctx.reply(
-        f"**Thời gian voice của {target.display_name}**\n"
-        f"Tổng tích lũy: **{total / 3600:.2f} giờ**\n" + "\n".join(lines),
+        embed=embed,
         mention_author=False,
         allowed_mentions=discord.AllowedMentions.none(),
     )
