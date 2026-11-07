@@ -598,24 +598,6 @@ class RoomGroup(app_commands.Group):
         embed = build_room_embed(channel, interaction.guild, room)
         await interaction.response.send_message(embed=embed, view=RoomControlView(), ephemeral=True)
 
-    @app_commands.command(name="voice_time", description="Xem thời gian voice tích lũy của bạn hoặc thành viên")
-    async def voice_time(self, interaction: discord.Interaction, member: Optional[discord.Member] = None):
-        if interaction.guild is None:
-            await respond(interaction, "Lệnh này chỉ dùng trong server.")
-            return
-        target = member or interaction.user
-        try:
-            total = await bot.get_voice_time(interaction.guild.id, target.id)
-            periods = await bot.get_voice_time_periods(interaction.guild.id, target.id)
-        except Exception as exc:
-            await report_error(f"read voice time guild {interaction.guild.id}, member {target.id}", exc)
-            await respond(interaction, "Không đọc được thời gian voice. Hãy chạy migration Supabase trong `supabase_schema.sql` rồi thử lại.")
-            return
-        live_seconds = bot.get_live_voice_seconds(interaction.guild.id, target.id)
-        total += live_seconds
-        lines = [f"**{days} ngày:** {seconds / 3600:.2f} giờ" for days, seconds in periods.items()]
-        await respond(interaction, f"**Thời gian voice của {target.display_name}**\nTổng tích lũy: **{total / 3600:.2f} giờ**\n" + "\n".join(lines), ephemeral=True)
-
     @app_commands.command(name="restore", description="Khôi phục quyền quản lý cho room cũ")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def restore(self, interaction: discord.Interaction, owner: discord.Member):
@@ -665,7 +647,8 @@ class PermanentVoiceMaster(commands.Bot):
         intents = discord.Intents.default()
         intents.voice_states = True
         intents.members = True
-        super().__init__(command_prefix="!", intents=intents)
+        intents.message_content = True
+        super().__init__(command_prefix="ret", intents=intents)
         self.db = Database(SUPABASE_URL, SUPABASE_KEY)
         self._trigger_attempts: set[tuple[int, int]] = set()
         self._settings_cache: dict[int, Optional[dict]] = {}
@@ -1020,6 +1003,31 @@ class PermanentVoiceMaster(commands.Bot):
 
 
 bot = PermanentVoiceMaster()
+
+
+@bot.command(name="voice_time", aliases=["voicetime"])
+async def voice_time_prefix(ctx: commands.Context, member: Optional[discord.Member] = None):
+    """Show accumulated voice activity and recent 1/7/14 day totals."""
+    if ctx.guild is None:
+        await ctx.reply("Lệnh này chỉ dùng trong server.", mention_author=False)
+        return
+    target = member or ctx.author
+    try:
+        total = await bot.get_voice_time(ctx.guild.id, target.id)
+        periods = await bot.get_voice_time_periods(ctx.guild.id, target.id)
+    except Exception as exc:
+        await report_error(f"read voice time guild {ctx.guild.id}, member {target.id}", exc)
+        await ctx.reply("Không đọc được thời gian voice. Hãy chạy SQL trong `supabase_schema.sql` rồi thử lại.", mention_author=False)
+        return
+
+    total += bot.get_live_voice_seconds(ctx.guild.id, target.id)
+    lines = [f"**{days} ngày:** {seconds / 3600:.2f} giờ" for days, seconds in periods.items()]
+    await ctx.reply(
+        f"**Thời gian voice của {target.display_name}**\n"
+        f"Tổng tích lũy: **{total / 3600:.2f} giờ**\n" + "\n".join(lines),
+        mention_author=False,
+        allowed_mentions=discord.AllowedMentions.none(),
+    )
 
 
 @bot.tree.error

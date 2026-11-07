@@ -20,7 +20,7 @@ A Discord bot that automatically creates a personal voice channel when a member 
 - Supabase Postgres stores guild configuration, room IDs, room owners, and saved room names across restarts.
 - `/room panel` opens an embed dashboard for the room the user is currently in. Dropdowns edit the room name, user limit, lock state, and visibility; buttons refresh the panel, transfer ownership, or delete the room.
 - `/room claim` lets a member claim a room if its previous owner has left the server; admins can also claim it.
-- `/room voice_time [member]` shows accumulated voice time and the last 1, 7, and 14 days. The bot records member voice sessions across channels and resumes counting members present when it starts.
+- `!voice_time [@member]` shows accumulated voice time and the last 1, 7, and 14 days. `!voicetime` is an alias. The bot records member voice sessions across channels and resumes counting members present when it starts.
 - `/room restore owner:<member>` lets an administrator restore management for an existing room and repost its control embed if its database record was lost.
 - `/room delete` deletes the current room after confirmation.
 - Multiple servers are supported.
@@ -31,7 +31,7 @@ A Discord bot that automatically creates a personal voice channel when a member 
 - A Discord application and bot
 - Bot permissions: **Manage Channels**, **Move Members**, **View Channels**, **Connect**, **Send Messages**, **Embed Links**, **Set Voice Channel Status**. Manage Server is required for setup and voice configuration commands.
 - Put the bot's highest role above members it needs to move. Discord does not let the bot move the server owner; for the owner, VoiceMaster creates the room and sends a link to join it manually.
-- Enable **Server Members Intent** in the Discord Developer Portal (Bot page), as this project enables the members intent.
+- Enable **Server Members Intent** and **Message Content Intent** in the Discord Developer Portal (Bot page), as this project uses member and prefix commands.
 
 ## Install
 
