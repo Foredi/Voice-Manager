@@ -5,3 +5,6 @@ __pycache__/
 data/
 supabase_schema.sql
 migrate_sqlite_to_supabase.py
+github_deploy_key
+github_deploy_key.pub
+.early.coverage
