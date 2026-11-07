@@ -20,8 +20,8 @@ A Discord bot that automatically creates a personal voice channel when a member 
 - Supabase Postgres stores guild configuration, room IDs, room owners, and saved room names across restarts.
 - `/room panel` opens an embed dashboard for the room the user is currently in. Dropdowns edit the room name, user limit, lock state, and visibility; buttons refresh the panel, transfer ownership, or delete the room.
 - `/room claim` lets a member claim a room if its previous owner has left the server; admins can also claim it.
-- `ret voice_time` shows a server dashboard with the top 5 members by voice time and the top 5 voice rooms, including bar charts. `ret voice_time @member` shows that member's accumulated time and the last 1, 7, and 14 days. `ret voicetime` is an alias.
-- Voice sessions store their room ID so the leaderboard can show time per room. Re-run `supabase_schema.sql` after updating to add this column and its room leaderboard function.
+- `ret voice_time` shows your personal dashboard with time totals for 1, 7, and 14 days, your top voice rooms over the last 30 days, and a 24-hour chart of when you were in voice. Add `@member` to view another member.
+- Voice sessions store their room ID and timestamps. Re-run `supabase_schema.sql` after updating so new sessions can be grouped by room.
 - `/room restore owner:<member>` lets an administrator restore management for an existing room and repost its control embed if its database record was lost.
 - `/room delete` deletes the current room after confirmation.
 - Multiple servers are supported.

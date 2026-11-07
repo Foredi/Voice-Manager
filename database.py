@@ -60,24 +60,6 @@ class Database:
             {"p_guild_id": guild_id, "p_user_id": user_id, "p_seconds": seconds},
         ).execute()
 
-    def get_voice_leaderboard(self, guild_id: int, limit: int = 5) -> list[dict]:
-        response = (
-            self.client.table("voice_time")
-            .select("user_id,total_seconds")
-            .eq("guild_id", guild_id)
-            .order("total_seconds", desc=True)
-            .limit(limit)
-            .execute()
-        )
-        return getattr(response, "data", None) or []
-
-    def get_voice_room_leaderboard(self, guild_id: int, limit: int = 5) -> list[dict]:
-        response = self.client.rpc(
-            "get_voice_room_leaderboard",
-            {"p_guild_id": guild_id, "p_limit": limit},
-        ).execute()
-        return getattr(response, "data", None) or []
-
     def get_voice_time(self, guild_id: int, user_id: int) -> int:
         response = (
             self.client.table("voice_time")
@@ -97,6 +79,18 @@ class Database:
             .eq("guild_id", guild_id)
             .eq("user_id", user_id)
             .gte("ended_at", since_iso)
+            .execute()
+        )
+        return getattr(response, "data", None) or []
+
+    def get_voice_sessions_since(self, guild_id: int, user_id: int, since_iso: str) -> list[dict]:
+        response = (
+            self.client.table("voice_time_sessions")
+            .select("channel_id,started_at,ended_at,duration_seconds")
+            .eq("guild_id", guild_id)
+            .eq("user_id", user_id)
+            .gte("ended_at", since_iso)
+            .order("ended_at")
             .execute()
         )
         return getattr(response, "data", None) or []
