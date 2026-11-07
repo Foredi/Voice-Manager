@@ -45,6 +45,25 @@ jobs:
             ./ "$VPS_USER@$VPS_HOST:/opt/voicemaster/" \
             -e "ssh -i ~/.ssh/id_ed25519 -p $VPS_PORT"
 
+      - name: Verify deployed source
+        env:
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          local_hash="$(sha256sum bot.py | cut -d ' ' -f 1)"
+          remote_hash="$(ssh -i ~/.ssh/id_ed25519 \
+            -p "$VPS_PORT" \
+            "$VPS_USER@$VPS_HOST" \
+            'sha256sum /opt/voicemaster/bot.py | cut -d " " -f 1')"
+
+          test "$local_hash" = "$remote_hash" || {
+            echo "Deployed bot.py does not match the checked-out source."
+            echo "Local:  $local_hash"
+            echo "Remote: $remote_hash"
+            exit 1
+          }
+
       - name: Restart bot
         env:
           VPS_HOST: ${{ secrets.VPS_HOST }}
@@ -55,6 +74,7 @@ jobs:
             -p "$VPS_PORT" \
             "$VPS_USER@$VPS_HOST" \
             'cd /opt/voicemaster &&
-             .venv/bin/pip install -r requirements.txt &&
-             sudo systemctl restart voicemaster &&
-             sudo systemctl is-active --quiet voicemaster'
+             .venv/bin/python -m pip install -r requirements.txt &&
+             systemctl restart voicemaster &&
+             systemctl is-active --quiet voicemaster &&
+             readlink -f /proc/$(systemctl show -p MainPID --value voicemaster)/exe'
