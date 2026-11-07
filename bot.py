@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
 import os
 import re
+import tempfile
 import time
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -75,6 +77,7 @@ def build_voice_activity_embed(
     hourly: list[int],
     rooms: list[dict],
     current_room_seconds: int,
+    companions: list[dict],
 ) -> discord.Embed:
     embed = discord.Embed(
         title="Voice Activity",
@@ -103,24 +106,76 @@ def build_voice_activity_embed(
         room_lines.insert(0, f"🔊 {current.mention} · **{format_duration(current_room_seconds)}** (phiên hiện tại)")
     embed.add_field(name="Room bạn thường vào • 30 ngày", value="\n".join(room_lines) or "Chưa có dữ liệu room.", inline=False)
 
-    peak = max(hourly, default=0)
-    chart = []
-    for hour, seconds in enumerate(hourly):
-        bars = round(10 * seconds / peak) if peak else 0
-        chart.append(f"{hour:02}:00 │ {'█' * bars}{'·' * (10 - bars)} {seconds / 3600:.1f}h")
-    embed.add_field(
-        name=f"Khung giờ bạn thường treo voice • 30 ngày ({VOICE_TIMEZONE.key if hasattr(VOICE_TIMEZONE, 'key') else 'UTC'})",
-        value="```text\n" + "\n".join(chart) + "\n```",
-        inline=False,
-    )
+    companion_lines = []
+    for rank, item in enumerate(companions[:5], 1):
+        other = member.guild.get_member(item["user_id"])
+        display = other.mention if other else f"<@{item['user_id']}>"
+        companion_lines.append(f"**{rank}.** {display} · **{format_duration(item['total_seconds'])}** cùng voice")
+    embed.add_field(name="Bạn thường treo voice cùng", value="\n".join(companion_lines) or "Chưa có dữ liệu người cùng phòng.", inline=False)
     embed.add_field(name="Tổng tích lũy", value=f"**{format_duration(total_seconds)}**", inline=True)
     if member.voice and member.voice.channel:
         voice_location = f"Đang ở {member.voice.channel.mention} · {format_duration(current_room_seconds)} trong phiên này"
     else:
         voice_location = "Hiện không ở voice"
     embed.add_field(name="Trạng thái hiện tại", value=voice_location, inline=True)
-    embed.set_footer(text="Biểu đồ chia thời gian voice theo giờ trong ngày, dựa trên 30 ngày gần nhất")
+    embed.set_footer(text="Biểu đồ theo giờ và room trong 30 ngày gần nhất")
     return embed
+
+
+def render_voice_chart(hourly: list[int], rooms: list[dict], guild: discord.Guild) -> io.BytesIO:
+    matplotlib_cache = Path(tempfile.gettempdir()) / "permanent-voicemaster-matplotlib"
+    matplotlib_cache.mkdir(parents=True, exist_ok=True)
+    os.environ.setdefault("MPLCONFIGDIR", str(matplotlib_cache))
+    os.environ.setdefault("XDG_CACHE_HOME", str(matplotlib_cache))
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    figure, (hour_axis, room_axis) = plt.subplots(1, 2, figsize=(12, 4.5), gridspec_kw={"width_ratios": [1.4, 1]})
+    figure.patch.set_facecolor("#232428")
+    for axis in (hour_axis, room_axis):
+        axis.set_facecolor("#2b2d31")
+        axis.tick_params(colors="#c9cdd2", labelsize=9)
+        for spine in axis.spines.values():
+            spine.set_color("#484b52")
+        axis.grid(axis="x", color="#45474e", alpha=0.45, linewidth=0.8)
+        axis.set_axisbelow(True)
+
+    hours = list(range(24))
+    hour_axis.bar(hours, [value / 3600 for value in hourly], color="#3ba55c", width=0.72)
+    hour_axis.set_title(f"Giờ thường treo voice ({VOICE_TIMEZONE.key if hasattr(VOICE_TIMEZONE, 'key') else 'UTC'})", color="#f2f3f5", loc="left", pad=12)
+    hour_axis.set_xlabel("Giờ trong ngày", color="#c9cdd2")
+    hour_axis.set_ylabel("Số giờ voice · 30 ngày", color="#c9cdd2")
+    hour_axis.set_xticks(range(0, 24, 2), [f"{hour:02}:00" for hour in range(0, 24, 2)])
+    hour_axis.set_xlim(-0.6, 23.6)
+
+    room_rows = rooms[:5]
+    room_labels = []
+    room_values = []
+    for item in room_rows:
+        channel = guild.get_channel(item["channel_id"])
+        room_labels.append(channel.name[:24] if channel else f"Deleted {item['channel_id']}")
+        room_values.append(item["total_seconds"] / 3600)
+    if room_rows:
+        y_positions = list(range(len(room_rows)))
+        room_axis.barh(y_positions, room_values, color="#d94f8a", height=0.62)
+        room_axis.set_yticks(y_positions, room_labels, color="#c9cdd2", fontsize=9)
+        room_axis.invert_yaxis()
+        for position, value in zip(y_positions, room_values):
+            room_axis.text(value, position, f" {value:.1f}h", va="center", color="#f2f3f5", fontsize=9)
+        room_axis.set_xlim(0, max(room_values) * 1.3 if max(room_values) else 1)
+    else:
+        room_axis.text(0.5, 0.5, "Chưa có dữ liệu room", ha="center", va="center", color="#c9cdd2", transform=room_axis.transAxes)
+        room_axis.set_yticks([])
+    room_axis.set_title("Thời gian theo room · 30 ngày", color="#f2f3f5", loc="left", pad=12)
+    room_axis.set_xlabel("Số giờ", color="#c9cdd2")
+    figure.tight_layout(pad=2.0)
+    output = io.BytesIO()
+    figure.savefig(output, format="png", dpi=160, facecolor=figure.get_facecolor(), bbox_inches="tight")
+    plt.close(figure)
+    output.seek(0)
+    return output
 
 
 async def respond(interaction: discord.Interaction, content: str, *, ephemeral: bool = True) -> None:
@@ -804,6 +859,27 @@ class PermanentVoiceMaster(commands.Bot):
         ]
         return hourly, top_rooms
 
+    async def get_voice_companions(self, guild_id: int, user_id: int, limit: int = 5) -> list[dict]:
+        rows = await asyncio.to_thread(self.db.get_voice_companion_leaderboard, guild_id, user_id, limit)
+        seconds_by_user = {int(row["user_id"]): int(row["total_seconds"]) for row in rows}
+        target_key = (guild_id, user_id)
+        target_start = self._voice_sessions.get(target_key)
+        target_channel = self._voice_session_channels.get(target_key)
+        if target_start is not None and target_channel is not None:
+            now = time.time()
+            for other_key, other_start in self._voice_sessions.items():
+                other_guild, other_user = other_key
+                if other_guild != guild_id or other_user == user_id:
+                    continue
+                if self._voice_session_channels.get(other_key) != target_channel:
+                    continue
+                overlap = max(0, int(now - max(target_start, other_start)))
+                seconds_by_user[other_user] = seconds_by_user.get(other_user, 0) + overlap
+        return [
+            {"user_id": other_user, "total_seconds": seconds}
+            for other_user, seconds in sorted(seconds_by_user.items(), key=lambda item: item[1], reverse=True)[:limit]
+        ]
+
     async def get_voice_time_periods(self, guild_id: int, user_id: int) -> dict[int, int]:
         now = time.time()
         periods: dict[int, int] = {}
@@ -1140,6 +1216,7 @@ async def voice_time_prefix(ctx: commands.Context, member: Optional[discord.Memb
         total = await bot.get_voice_time(ctx.guild.id, target.id)
         periods = await bot.get_voice_time_periods(ctx.guild.id, target.id)
         hourly, rooms = await bot.get_personal_voice_breakdown(ctx.guild.id, target.id)
+        companions = await bot.get_voice_companions(ctx.guild.id, target.id, 5)
     except Exception as exc:
         await report_error(f"read voice time guild {ctx.guild.id}, member {target.id}", exc)
         await ctx.reply("Không đọc được thời gian voice. Hãy chạy SQL trong `supabase_schema.sql` rồi thử lại.", mention_author=False)
@@ -1153,9 +1230,14 @@ async def voice_time_prefix(ctx: commands.Context, member: Optional[discord.Memb
         hourly,
         rooms,
         bot.get_live_voice_seconds(ctx.guild.id, target.id),
+        companions,
     )
+    chart_image = await asyncio.to_thread(render_voice_chart, hourly, rooms, ctx.guild)
+    embed.set_image(url="attachment://voice_activity.png")
+    chart_file = discord.File(chart_image, filename="voice_activity.png")
     await ctx.reply(
         embed=embed,
+        file=chart_file,
         mention_author=False,
         allowed_mentions=discord.AllowedMentions.none(),
     )

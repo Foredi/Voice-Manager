@@ -95,6 +95,13 @@ class Database:
         )
         return getattr(response, "data", None) or []
 
+    def get_voice_companion_leaderboard(self, guild_id: int, user_id: int, limit: int = 5) -> list[dict]:
+        response = self.client.rpc(
+            "get_voice_companion_leaderboard",
+            {"p_guild_id": guild_id, "p_user_id": user_id, "p_limit": limit},
+        ).execute()
+        return getattr(response, "data", None) or []
+
     def get_voice_seconds_since(self, guild_id: int, user_id: int, since_iso: str) -> int:
         response = (
             self.client.table("voice_time_sessions")
