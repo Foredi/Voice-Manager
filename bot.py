@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import time
+from datetime import datetime, timezone
 import aiohttp
 from pathlib import Path
 from typing import Optional
@@ -597,6 +598,24 @@ class RoomGroup(app_commands.Group):
         embed = build_room_embed(channel, interaction.guild, room)
         await interaction.response.send_message(embed=embed, view=RoomControlView(), ephemeral=True)
 
+    @app_commands.command(name="voice_time", description="Xem thời gian voice tích lũy của bạn hoặc thành viên")
+    async def voice_time(self, interaction: discord.Interaction, member: Optional[discord.Member] = None):
+        if interaction.guild is None:
+            await respond(interaction, "Lệnh này chỉ dùng trong server.")
+            return
+        target = member or interaction.user
+        try:
+            total = await bot.get_voice_time(interaction.guild.id, target.id)
+            periods = await bot.get_voice_time_periods(interaction.guild.id, target.id)
+        except Exception as exc:
+            await report_error(f"read voice time guild {interaction.guild.id}, member {target.id}", exc)
+            await respond(interaction, "Không đọc được thời gian voice. Hãy chạy migration Supabase trong `supabase_schema.sql` rồi thử lại.")
+            return
+        live_seconds = bot.get_live_voice_seconds(interaction.guild.id, target.id)
+        total += live_seconds
+        lines = [f"**{days} ngày:** {seconds / 3600:.2f} giờ" for days, seconds in periods.items()]
+        await respond(interaction, f"**Thời gian voice của {target.display_name}**\nTổng tích lũy: **{total / 3600:.2f} giờ**\n" + "\n".join(lines), ephemeral=True)
+
     @app_commands.command(name="restore", description="Khôi phục quyền quản lý cho room cũ")
     @app_commands.checks.has_permissions(manage_guild=True)
     async def restore(self, interaction: discord.Interaction, owner: discord.Member):
@@ -655,6 +674,7 @@ class PermanentVoiceMaster(commands.Bot):
         self._managed_rooms: dict[int, dict] = {}
         self._voice_channels: dict[int, int] = {}
         self._last_room_create: dict[tuple[int, int], float] = {}
+        self._voice_sessions: dict[tuple[int, int], float] = {}
 
     def get_cached_settings(self, guild_id: int):
         # Cache is loaded when the bot becomes ready and updated by /setup.
@@ -678,6 +698,48 @@ class PermanentVoiceMaster(commands.Bot):
 
     def _read_guild_cache(self, guild_id: int):
         return self.db.get_settings(guild_id), self.db.get_room_name_preferences(guild_id)
+
+    async def get_voice_time(self, guild_id: int, user_id: int) -> int:
+        return await asyncio.to_thread(self.db.get_voice_time, guild_id, user_id)
+
+    async def get_voice_time_periods(self, guild_id: int, user_id: int) -> dict[int, int]:
+        now = time.time()
+        periods: dict[int, int] = {}
+        for days in (1, 7, 14):
+            since_epoch = now - days * 86400
+            since_iso = datetime.fromtimestamp(since_epoch, timezone.utc).isoformat()
+            sessions = await asyncio.to_thread(self.db.get_voice_time_periods, guild_id, user_id, since_iso)
+            seconds = 0
+            for session in sessions:
+                started = datetime.fromisoformat(session["started_at"].replace("Z", "+00:00")).timestamp()
+                ended = datetime.fromisoformat(session["ended_at"].replace("Z", "+00:00")).timestamp()
+                seconds += max(0, int(ended - max(started, since_epoch)))
+            live_start = self._voice_sessions.get((guild_id, user_id))
+            if live_start is not None:
+                seconds += max(0, int(now - max(live_start, since_epoch)))
+            periods[days] = seconds
+        return periods
+
+    def get_live_voice_seconds(self, guild_id: int, user_id: int) -> int:
+        started = self._voice_sessions.get((guild_id, user_id))
+        return max(0, int(time.time() - started)) if started is not None else 0
+
+    async def _close_voice_session(self, guild_id: int, user_id: int) -> None:
+        started = self._voice_sessions.pop((guild_id, user_id), None)
+        if started is None:
+            return
+        ended = time.time()
+        try:
+            await asyncio.to_thread(
+                self.db.add_voice_session,
+                guild_id,
+                user_id,
+                datetime.fromtimestamp(started, timezone.utc).isoformat(),
+                datetime.fromtimestamp(ended, timezone.utc).isoformat(),
+                max(0, int(ended - started)),
+            )
+        except Exception as exc:
+            await report_error(f"save voice session guild {guild_id}, member {user_id}", exc)
 
     async def setup_hook(self) -> None:
         self.tree.add_command(VoiceMasterGroup())
@@ -718,6 +780,12 @@ class PermanentVoiceMaster(commands.Bot):
                 await post_webhook(ERROR_WEBHOOK_URL, f"**VoiceMaster voice reconnect failed**\nGuild `{guild.id}`, channel `{channel.id}`. Check View Channel and Connect permissions.")
         await self._cleanup_stale_rooms()
         await self._create_rooms_for_waiting_members()
+        session_start = time.time()
+        for guild in self.guilds:
+            for channel in guild.voice_channels:
+                for member in channel.members:
+                    if not member.bot:
+                        self._voice_sessions.setdefault((guild.id, member.id), session_start)
 
     async def _cleanup_empty_room(self, channel: discord.abc.GuildChannel) -> None:
         if not isinstance(channel, discord.VoiceChannel):
@@ -914,6 +982,13 @@ class PermanentVoiceMaster(commands.Bot):
             await post_webhook(ERROR_WEBHOOK_URL, f"**VoiceMaster Discord API error**\nGuild `{member.guild.id}`, member `{member.id}`. Check bot logs for details.")
 
     async def on_voice_state_update(self, member: discord.Member, before: discord.VoiceState, after: discord.VoiceState) -> None:
+        if not member.bot and before.channel != after.channel:
+            key = (member.guild.id, member.id)
+            if before.channel is not None:
+                await self._close_voice_session(*key)
+            if after.channel is not None:
+                self._voice_sessions[key] = time.time()
+
         if before.channel is not None and before.channel != after.channel:
             # Runs for both humans and bots, so another bot leaving can trigger cleanup.
             await self._cleanup_empty_room(before.channel)

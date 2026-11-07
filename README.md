@@ -20,6 +20,7 @@ A Discord bot that automatically creates a personal voice channel when a member 
 - Supabase Postgres stores guild configuration, room IDs, room owners, and saved room names across restarts.
 - `/room panel` opens an embed dashboard for the room the user is currently in. Dropdowns edit the room name, user limit, lock state, and visibility; buttons refresh the panel, transfer ownership, or delete the room.
 - `/room claim` lets a member claim a room if its previous owner has left the server; admins can also claim it.
+- `/room voice_time [member]` shows accumulated voice time and the last 1, 7, and 14 days. The bot records member voice sessions across channels and resumes counting members present when it starts.
 - `/room restore owner:<member>` lets an administrator restore management for an existing room and repost its control embed if its database record was lost.
 - `/room delete` deletes the current room after confirmation.
 - Multiple servers are supported.
@@ -46,7 +47,7 @@ pip install -r requirements.txt
 
 Set `DISCORD_TOKEN`, `SUPABASE_URL`, and `SUPABASE_KEY` in `.env`. `SUPABASE_KEY` must be the project's service role key because the bot accesses the database server-side while Row Level Security is enabled. Keep it private and never commit `.env`. Optional settings: `ERROR_WEBHOOK_URL`, `AUDIT_WEBHOOK_URL`, `ROOM_CREATE_COOLDOWN=30`, and `MAX_ROOMS_PER_USER=3` (set the cap to `0` for no cap). Discord webhook URLs are secrets; keep them private.
 
-Before starting the bot, run the entire [`supabase_schema.sql`](supabase_schema.sql) file in the Supabase SQL Editor for the same project as `SUPABASE_URL`. It creates the tables and refreshes the REST schema cache. To import existing SQLite data, install requirements, then run `python migrate_sqlite_to_supabase.py` once. The migration reads `DATABASE_PATH` (default `data/voicemaster.sqlite3`), upserts the rows, and leaves the SQLite file unchanged. Verify the imported data before retiring the SQLite backup.
+Before starting the bot, run the entire [`supabase_schema.sql`](supabase_schema.sql) file in the Supabase SQL Editor for the same project as `SUPABASE_URL`. It creates the tables and refreshes the REST schema cache. If you already installed this bot, run the updated SQL file again to create the voice activity tables. To import existing SQLite data, install requirements, then run `python migrate_sqlite_to_supabase.py` once. The migration reads `DATABASE_PATH` (default `data/voicemaster.sqlite3`), upserts the rows, and leaves the SQLite file unchanged. Verify the imported data before retiring the SQLite backup.
 
 ```bash
 python bot.py

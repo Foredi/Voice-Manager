@@ -44,6 +44,55 @@ class Database:
     def clear_voice_channel(self, guild_id: int) -> None:
         self.client.table("voice_presence").delete().eq("guild_id", guild_id).execute()
 
+    def add_voice_session(self, guild_id: int, user_id: int, started_at: str, ended_at: str, seconds: int) -> None:
+        if seconds <= 0:
+            return
+        self.client.table("voice_time_sessions").insert({
+            "guild_id": guild_id,
+            "user_id": user_id,
+            "started_at": started_at,
+            "ended_at": ended_at,
+            "duration_seconds": seconds,
+        }).execute()
+        self.client.rpc(
+            "increment_voice_time",
+            {"p_guild_id": guild_id, "p_user_id": user_id, "p_seconds": seconds},
+        ).execute()
+
+    def get_voice_time(self, guild_id: int, user_id: int) -> int:
+        response = (
+            self.client.table("voice_time")
+            .select("total_seconds")
+            .eq("guild_id", guild_id)
+            .eq("user_id", user_id)
+            .limit(1)
+            .execute()
+        )
+        rows = getattr(response, "data", None) or []
+        return int(rows[0]["total_seconds"]) if rows else 0
+
+    def get_voice_time_periods(self, guild_id: int, user_id: int, since_iso: str) -> list[dict]:
+        response = (
+            self.client.table("voice_time_sessions")
+            .select("started_at,ended_at,duration_seconds")
+            .eq("guild_id", guild_id)
+            .eq("user_id", user_id)
+            .gte("ended_at", since_iso)
+            .execute()
+        )
+        return getattr(response, "data", None) or []
+
+    def get_voice_seconds_since(self, guild_id: int, user_id: int, since_iso: str) -> int:
+        response = (
+            self.client.table("voice_time_sessions")
+            .select("duration_seconds")
+            .eq("guild_id", guild_id)
+            .eq("user_id", user_id)
+            .gte("ended_at", since_iso)
+            .execute()
+        )
+        return sum(int(row["duration_seconds"]) for row in (getattr(response, "data", None) or []))
+
     def add_room(self, channel_id: int, guild_id: int, owner_id: int) -> None:
         self.client.table("rooms").upsert(
             {"channel_id": channel_id, "guild_id": guild_id, "owner_id": owner_id},
