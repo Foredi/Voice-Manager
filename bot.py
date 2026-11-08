@@ -52,11 +52,6 @@ def format_duration(seconds: int) -> str:
     return f"{hours}h {minutes:02}m" if hours else f"{minutes}m"
 
 
-def activity_bar(seconds: int, window_seconds: int, width: int = 12) -> str:
-    filled = min(width, round(width * max(0, seconds) / window_seconds))
-    return "▰" * filled + "▱" * (width - filled)
-
-
 def add_interval_to_hourly(hourly: list[int], started: float, ended: float) -> None:
     cursor = started
     while cursor < ended:
@@ -74,7 +69,6 @@ def build_voice_activity_embed(
     member: discord.Member,
     total_seconds: int,
     periods: dict[int, int],
-    hourly: list[int],
     rooms: list[dict],
     current_room_seconds: int,
     companions: list[dict],
@@ -85,12 +79,8 @@ def build_voice_activity_embed(
         color=discord.Color.from_rgb(47, 49, 54),
     )
     embed.set_thumbnail(url=member.display_avatar.url)
-    activity_lines = [
-        f"**{days} ngày**　{seconds / 3600:.2f} giờ　`{activity_bar(seconds, days * 86400, 10)}`"
-        for days, seconds in periods.items()
-    ]
+    activity_lines = [f"**{days} ngày**　{seconds / 3600:.2f} giờ" for days, seconds in periods.items()]
     embed.add_field(name="Voice Activity", value="\n".join(activity_lines), inline=False)
-    room_max = max((item["total_seconds"] for item in rooms), default=1)
     room_lines = []
     current_channel_id = member.voice.channel.id if member.voice and member.voice.channel else None
     current_room_seen = False
@@ -100,7 +90,7 @@ def build_voice_activity_embed(
         is_current = item["channel_id"] == current_channel_id
         current_room_seen = current_room_seen or is_current
         marker = "🔊 " if is_current else ""
-        room_lines.append(f"{marker}{name} · **{format_duration(item['total_seconds'])}** `{activity_bar(item['total_seconds'], room_max, 8)}`")
+        room_lines.append(f"{marker}{name} · **{format_duration(item['total_seconds'])}**")
     if member.voice and member.voice.channel and not current_room_seen:
         current = member.voice.channel
         room_lines.insert(0, f"🔊 {current.mention} · **{format_duration(current_room_seconds)}** (phiên hiện tại)")
@@ -122,7 +112,7 @@ def build_voice_activity_embed(
     return embed
 
 
-def render_voice_chart(hourly: list[int]) -> io.BytesIO:
+def render_voice_chart(hourly: list[int], session_counts: list[int]) -> io.BytesIO:
     matplotlib_cache = Path(tempfile.gettempdir()) / "permanent-voicemaster-matplotlib"
     matplotlib_cache.mkdir(parents=True, exist_ok=True)
     os.environ.setdefault("MPLCONFIGDIR", str(matplotlib_cache))
@@ -131,36 +121,45 @@ def render_voice_chart(hourly: list[int]) -> io.BytesIO:
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+    import numpy as np
 
-    figure, hour_axis = plt.subplots(figsize=(12, 4.5))
-    figure.patch.set_facecolor("#232428")
-    hour_axis.set_facecolor("#2b2d31")
-    hour_axis.tick_params(colors="#c9cdd2", labelsize=9)
-    for spine in hour_axis.spines.values():
-        spine.set_color("#484b52")
-    hour_axis.grid(axis="y", color="#45474e", alpha=0.45, linewidth=0.8)
-    hour_axis.set_axisbelow(True)
+    figure, axis = plt.subplots(figsize=(12, 4.2))
+    figure.patch.set_facecolor("#2b2d31")
+    axis.set_facecolor("#2b2d31")
+    axis.tick_params(colors="#c9cdd2", labelsize=10)
+    for spine in axis.spines.values():
+        spine.set_visible(False)
+    axis.grid(axis="x", color="#41434a", alpha=0.28, linewidth=0.7)
+    axis.set_axisbelow(True)
 
-    hours = list(range(24))
-    hour_values = [value / 3600 for value in hourly]
-    bars = hour_axis.bar(hours, hour_values, color="#3ba55c", width=0.72)
-    hour_axis.set_title(f"Hoạt động voice theo giờ · 30 ngày ({VOICE_TIMEZONE.key if hasattr(VOICE_TIMEZONE, 'key') else 'UTC'})", color="#f2f3f5", loc="left", pad=12)
-    hour_axis.set_xlabel("Giờ trong ngày", color="#c9cdd2")
-    hour_axis.set_ylabel("Số giờ voice", color="#c9cdd2")
-    hour_axis.set_xticks(range(0, 24, 2), [f"{hour:02}:00" for hour in range(0, 24, 2)])
-    hour_axis.set_xlim(-0.6, 23.6)
-    for bar, value in zip(bars, hour_values):
-        if value > 0:
-            hour_axis.text(
-                bar.get_x() + bar.get_width() / 2,
-                value,
-                f"{value:.1f}",
-                ha="center",
-                va="bottom",
-                color="#f2f3f5",
-                fontsize=8,
-            )
-    figure.tight_layout(pad=2.0)
+    hours = np.arange(24)
+    smooth_hours = np.linspace(0, 23, 300)
+    voice_minutes = np.asarray(hourly, dtype=float) / 60
+    starts = np.asarray(session_counts, dtype=float)
+    voice_curve = np.interp(smooth_hours, hours, voice_minutes)
+    start_curve = np.interp(smooth_hours, hours, starts)
+    voice_peak = max(float(voice_curve.max()), 1e-9)
+    start_peak = max(float(start_curve.max()), 1e-9)
+    voice_curve = voice_curve / voice_peak * 100
+    start_curve = start_curve / start_peak * 100
+    kernel_x = np.arange(-9, 10)
+    kernel = np.exp(-(kernel_x ** 2) / (2 * 2.8 ** 2))
+    kernel /= kernel.sum()
+    voice_curve = np.convolve(np.pad(voice_curve, (9, 9), mode="edge"), kernel, mode="valid")
+    start_curve = np.convolve(np.pad(start_curve, (9, 9), mode="edge"), kernel, mode="valid")
+
+    voice_color, start_color = "#df4f91", "#39b85a"
+    axis.plot(smooth_hours, voice_curve, color=voice_color, linewidth=3.3, label="Voice · phút", solid_capstyle="round")
+    axis.fill_between(smooth_hours, voice_curve, color=voice_color, alpha=0.07)
+    axis.set_xlabel("Giờ trong ngày", color="#c9cdd2", labelpad=10)
+    axis.set_xticks(range(0, 24, 2), [f"{hour:02}:00" for hour in range(0, 24, 2)])
+    axis.set_xlim(0, 23)
+    axis.set_ylim(0, 108)
+    axis.set_yticks([])
+    axis.plot(smooth_hours, start_curve, color=start_color, linewidth=3.0, label="Lượt vào voice", solid_capstyle="round")
+    axis.legend(loc="upper right", frameon=False, ncol=2, labelcolor="#f2f3f5")
+    axis.set_title(f"Voice Activity · 30 ngày ({VOICE_TIMEZONE.key if hasattr(VOICE_TIMEZONE, 'key') else 'UTC'})", color="#f2f3f5", loc="left", pad=14)
+    figure.tight_layout(pad=1.8)
     output = io.BytesIO()
     figure.savefig(output, format="png", dpi=160, facecolor=figure.get_facecolor(), bbox_inches="tight")
     plt.close(figure)
@@ -816,16 +815,19 @@ class PermanentVoiceMaster(commands.Bot):
     async def get_voice_time(self, guild_id: int, user_id: int) -> int:
         return await asyncio.to_thread(self.db.get_voice_time, guild_id, user_id)
 
-    async def get_personal_voice_breakdown(self, guild_id: int, user_id: int, days: int = 30) -> tuple[list[int], list[dict]]:
+    async def get_personal_voice_breakdown(self, guild_id: int, user_id: int, days: int = 30) -> tuple[list[int], list[int], list[dict]]:
         now = time.time()
         since = now - days * 86400
         since_iso = datetime.fromtimestamp(since, timezone.utc).isoformat()
         sessions = await asyncio.to_thread(self.db.get_voice_sessions_since, guild_id, user_id, since_iso)
         hourly = [0] * 24
+        session_counts = [0] * 24
         rooms: dict[int, int] = {}
         for session in sessions:
             started = datetime.fromisoformat(session["started_at"].replace("Z", "+00:00")).timestamp()
             ended = datetime.fromisoformat(session["ended_at"].replace("Z", "+00:00")).timestamp()
+            if started >= since:
+                session_counts[datetime.fromtimestamp(started, VOICE_TIMEZONE).hour] += 1
             started = max(started, since)
             ended = min(ended, now)
             elapsed = max(0, int(ended - started))
@@ -838,6 +840,8 @@ class PermanentVoiceMaster(commands.Bot):
         active_start = self._voice_sessions.get(key)
         channel_id = self._voice_session_channels.get(key)
         if active_start is not None:
+            if active_start >= since:
+                session_counts[datetime.fromtimestamp(active_start, VOICE_TIMEZONE).hour] += 1
             started = max(active_start, since)
             active_seconds = max(0, int(now - started))
             add_interval_to_hourly(hourly, started, now)
@@ -847,7 +851,7 @@ class PermanentVoiceMaster(commands.Bot):
             {"channel_id": channel_id, "total_seconds": seconds}
             for channel_id, seconds in sorted(rooms.items(), key=lambda item: item[1], reverse=True)[:5]
         ]
-        return hourly, top_rooms
+        return hourly, session_counts, top_rooms
 
     async def get_voice_companions(self, guild_id: int, user_id: int, limit: int = 5) -> list[dict]:
         rows = await asyncio.to_thread(self.db.get_voice_companion_leaderboard, guild_id, user_id, limit)
@@ -1205,7 +1209,7 @@ async def voice_time_prefix(ctx: commands.Context, member: Optional[discord.Memb
     try:
         total = await bot.get_voice_time(ctx.guild.id, target.id)
         periods = await bot.get_voice_time_periods(ctx.guild.id, target.id)
-        hourly, rooms = await bot.get_personal_voice_breakdown(ctx.guild.id, target.id)
+        hourly, session_counts, rooms = await bot.get_personal_voice_breakdown(ctx.guild.id, target.id)
         companions = await bot.get_voice_companions(ctx.guild.id, target.id, 5)
     except Exception as exc:
         await report_error(f"read voice time guild {ctx.guild.id}, member {target.id}", exc)
@@ -1217,12 +1221,11 @@ async def voice_time_prefix(ctx: commands.Context, member: Optional[discord.Memb
         target,
         total,
         periods,
-        hourly,
         rooms,
         bot.get_live_voice_seconds(ctx.guild.id, target.id),
         companions,
     )
-    chart_image = await asyncio.to_thread(render_voice_chart, hourly)
+    chart_image = await asyncio.to_thread(render_voice_chart, hourly, session_counts)
     embed.set_image(url="attachment://voice_activity.png")
     chart_file = discord.File(chart_image, filename="voice_activity.png")
     await ctx.reply(
