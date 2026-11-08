@@ -232,7 +232,7 @@ async def get_managed_room(interaction: discord.Interaction, *, require_owner: b
         await respond(interaction, "Bạn cần ở trong room voice của mình để sử dụng chức năng này.")
         return None
 
-    room = bot._managed_rooms.get(channel.id) or await bot.db_call(bot.db.get_room, channel.id)
+    room = bot._managed_rooms.get(channel.id) or bot.db.get_room(channel.id)
     if room is None:
         await respond(interaction, "Room này không được quản lý bởi bot.")
         return None
@@ -254,14 +254,14 @@ class RenameRoomModal(discord.ui.Modal, title="Đổi tên room"):
         try:
             new_name = str(self.new_name).strip()
             await channel.edit(name=new_name, reason=f"Room renamed by {interaction.user}")
-            room = bot._managed_rooms.get(channel.id) or await bot.db_call(bot.db.get_room, channel.id)
+            room = bot._managed_rooms.get(channel.id) or bot.db.get_room(channel.id)
             saved = bool(
                 interaction.guild
                 and room
                 and room["owner_id"] == interaction.user.id
             )
             if saved:
-                await bot.db_call(
+                await asyncio.to_thread(
                     bot.db.set_room_name_preference,
                     interaction.guild.id,
                     interaction.user.id,
@@ -355,7 +355,7 @@ class TransferOwnerModal(discord.ui.Modal, title="Chuyển quyền chủ phòng"
         if member is None or member.bot:
             await interaction.response.send_message("Không tìm thấy thành viên hợp lệ trong server.", ephemeral=True)
             return
-        await bot.db_call(bot.db.set_room_owner, channel.id, member.id)
+        bot.db.set_room_owner(channel.id, member.id)
         if channel.id in bot._managed_rooms:
             bot._managed_rooms[channel.id]["owner_id"] = member.id
         await audit(interaction.guild, interaction.user, f"chuyển chủ room cho {member} ({member.id})", channel)
@@ -375,7 +375,7 @@ class ConfirmDeleteView(discord.ui.View):
             return
         channel = interaction.guild.get_channel(self.channel_id) if interaction.guild else None
         if not isinstance(channel, discord.VoiceChannel):
-            await bot.db_call(bot.db.delete_room, self.channel_id)
+            bot.db.delete_room(self.channel_id)
             bot._managed_rooms.pop(self.channel_id, None)
             await interaction.response.send_message("Room không còn tồn tại. Đã dọn dữ liệu.", ephemeral=True)
             return
@@ -388,10 +388,10 @@ class ConfirmDeleteView(discord.ui.View):
             await channel.delete(reason=f"Permanent room deleted by {interaction.user}")
             if interaction.guild:
                 await audit(interaction.guild, interaction.user, "xóa room", channel)
-            await bot.db_call(bot.db.delete_room, self.channel_id)
+            bot.db.delete_room(self.channel_id)
             bot._managed_rooms.pop(self.channel_id, None)
         except discord.NotFound:
-            await bot.db_call(bot.db.delete_room, self.channel_id)
+            bot.db.delete_room(self.channel_id)
             bot._managed_rooms.pop(self.channel_id, None)
             log.info("Room %s was already deleted; removed its database row", self.channel_id)
         except discord.Forbidden:
@@ -535,7 +535,7 @@ class RoomControlView(discord.ui.View):
         channel = await get_managed_room(interaction)
         if channel is None or interaction.guild is None:
             return
-        room = bot._managed_rooms.get(channel.id) or await bot.db_call(bot.db.get_room, channel.id)
+        room = bot.db.get_room(channel.id)
         await interaction.response.edit_message(embed=build_room_embed(channel, interaction.guild, room), view=self)
 
     @discord.ui.button(label="Chuyển chủ", emoji="👑", style=discord.ButtonStyle.primary, custom_id="permanent_vm:transfer")
@@ -568,7 +568,7 @@ class VoiceMasterGroup(app_commands.Group):
             await interaction.response.send_message("Lệnh này chỉ dùng trong server.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        existing = await bot.db_call(bot.db.get_settings, interaction.guild.id)
+        existing = bot.db.get_settings(interaction.guild.id)
         if existing:
             category = interaction.guild.get_channel(existing["category_id"])
             trigger = interaction.guild.get_channel(existing["trigger_channel_id"])
@@ -583,7 +583,7 @@ class VoiceMasterGroup(app_commands.Group):
         try:
             category = await interaction.guild.create_category("Voice Rooms", reason="VoiceMaster setup")
             trigger = await interaction.guild.create_voice_channel("➕ Create Voice", category=category, reason="VoiceMaster setup")
-            await bot.db_call(bot.db.set_settings, interaction.guild.id, category.id, trigger.id)
+            bot.db.set_settings(interaction.guild.id, category.id, trigger.id)
             bot._settings_cache[interaction.guild.id] = {
                 "guild_id": interaction.guild.id,
                 "category_id": category.id,
@@ -608,7 +608,7 @@ class VoiceMasterGroup(app_commands.Group):
             await respond(interaction, "Hãy chọn category và kênh voice trong server này.")
             return
         try:
-            await bot.db_call(bot.db.set_settings, interaction.guild.id, category.id, channel.id)
+            await asyncio.to_thread(bot.db.set_settings, interaction.guild.id, category.id, channel.id)
         except Exception as exc:
             await report_error(f"save trigger config guild {interaction.guild.id}", exc)
             await respond(interaction, "Không lưu được cấu hình. Đã gửi lỗi qua webhook.")
@@ -635,7 +635,7 @@ class VoiceMasterGroup(app_commands.Group):
                     await voice_client.move_to(channel)
             else:
                 await channel.connect(self_deaf=True)
-            await bot.db_call(bot.db.set_voice_channel, interaction.guild.id, channel.id)
+            await asyncio.to_thread(bot.db.set_voice_channel, interaction.guild.id, channel.id)
             bot._voice_channels[interaction.guild.id] = channel.id
             await interaction.followup.send(
                 f"Bot đã vào {channel.mention} và sẽ tự vào lại sau khi khởi động lại.", ephemeral=True
@@ -655,7 +655,7 @@ class VoiceMasterGroup(app_commands.Group):
         if interaction.guild is None:
             await interaction.response.send_message("Lệnh này chỉ dùng trong server.", ephemeral=True)
             return
-        await bot.db_call(bot.db.clear_voice_channel, interaction.guild.id)
+        await asyncio.to_thread(bot.db.clear_voice_channel, interaction.guild.id)
         bot._voice_channels.pop(interaction.guild.id, None)
         voice_client = interaction.guild.voice_client
         if voice_client:
@@ -680,7 +680,7 @@ class VoiceMasterGroup(app_commands.Group):
         saved_id = bot._voice_channels.get(interaction.guild.id)
         if saved_id is None:
             try:
-                saved_id = await bot.db_call(bot.db.get_voice_channel, interaction.guild.id)
+                saved_id = await asyncio.to_thread(bot.db.get_voice_channel, interaction.guild.id)
                 if saved_id:
                     bot._voice_channels[interaction.guild.id] = saved_id
             except Exception as exc:
@@ -700,7 +700,7 @@ class VoiceMasterGroup(app_commands.Group):
             await interaction.response.send_message("Lệnh này chỉ dùng trong server.", ephemeral=True)
             return
         try:
-            settings = await bot.get_cached_settings(interaction.guild.id)
+            settings = bot.get_cached_settings(interaction.guild.id)
         except Exception as exc:
             await report_error(f"read config guild {interaction.guild.id}", exc)
             await respond(interaction, "Không đọc được cấu hình từ database. Đã gửi lỗi qua webhook.")
@@ -730,7 +730,7 @@ class RoomGroup(app_commands.Group):
         channel = await get_managed_room(interaction)
         if channel is None:
             return
-        room = bot._managed_rooms.get(channel.id) or await bot.db_call(bot.db.get_room, channel.id)
+        room = bot._managed_rooms.get(channel.id) or bot.db.get_room(channel.id)
         embed = build_room_embed(channel, interaction.guild, room)
         await interaction.response.send_message(embed=embed, view=RoomControlView(), ephemeral=True)
 
@@ -745,7 +745,7 @@ class RoomGroup(app_commands.Group):
             await interaction.response.send_message("Hãy vào room cần khôi phục trước.", ephemeral=True)
             return
         await interaction.response.defer(ephemeral=True, thinking=True)
-        await bot.db_call(bot.db.add_room, channel.id, interaction.guild.id, owner.id)
+        bot.db.add_room(channel.id, interaction.guild.id, owner.id)
         room = {"channel_id": channel.id, "guild_id": interaction.guild.id, "owner_id": owner.id}
         bot._managed_rooms[channel.id] = room
         await bot._send_room_panel(channel, owner, room)
@@ -759,12 +759,12 @@ class RoomGroup(app_commands.Group):
         channel = await get_managed_room(interaction, require_owner=False)
         if channel is None or interaction.guild is None or not isinstance(interaction.user, discord.Member):
             return
-        room = bot._managed_rooms.get(channel.id) or await bot.db_call(bot.db.get_room, channel.id)
+        room = bot._managed_rooms.get(channel.id) or bot.db.get_room(channel.id)
         old_owner = interaction.guild.get_member(room["owner_id"]) if room else None
         if old_owner is not None and old_owner.id != interaction.user.id and not is_admin(interaction.user):
             await interaction.response.send_message("Chủ phòng cũ vẫn còn trong server. Chỉ Admin mới có thể chuyển quyền trong trường hợp này.", ephemeral=True)
             return
-        await bot.db_call(bot.db.set_room_owner, channel.id, interaction.user.id)
+        bot.db.set_room_owner(channel.id, interaction.user.id)
         room["owner_id"] = interaction.user.id
         await interaction.response.send_message("Bạn đã trở thành chủ phòng.", ephemeral=True)
 
@@ -798,24 +798,19 @@ class PermanentVoiceMaster(commands.Bot):
         self._voice_session_channels: dict[tuple[int, int], int] = {}
         self._chart_executor: Optional[concurrent.futures.ProcessPoolExecutor] = None
         self._voice_heartbeat_task: Optional[asyncio.Task] = None
-        self._db_executor = concurrent.futures.ThreadPoolExecutor(max_workers=4, thread_name_prefix="voicemaster-db")
 
-    async def db_call(self, func, *args):
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._db_executor, func, *args)
-
-    async def get_cached_settings(self, guild_id: int):
+    def get_cached_settings(self, guild_id: int):
         # Cache is loaded when the bot becomes ready and updated by /setup.
         if guild_id not in self._settings_cache:
-            self._settings_cache[guild_id] = await self.db_call(self.db.get_settings, guild_id)
+            self._settings_cache[guild_id] = self.db.get_settings(guild_id)
         return self._settings_cache[guild_id]
 
-    async def get_cached_room_name(self, guild_id: int, user_id: int) -> Optional[str]:
+    def get_cached_room_name(self, guild_id: int, user_id: int) -> Optional[str]:
         key = (guild_id, user_id)
         if guild_id in self._room_names_loaded and key not in self._room_name_cache:
             self._room_name_cache[key] = None
         if key not in self._room_name_cache:
-            self._room_name_cache[key] = await self.db_call(self.db.get_room_name_preference, guild_id, user_id)
+            self._room_name_cache[key] = self.db.get_room_name_preference(guild_id, user_id)
         return self._room_name_cache[key]
 
     def _prune_room_create_cache(self) -> None:
@@ -835,7 +830,7 @@ class PermanentVoiceMaster(commands.Bot):
         self._prune_room_create_cache()
 
     async def _load_guild_cache(self, guild_id: int) -> None:
-        settings, names = await self.db_call(self._read_guild_cache, guild_id)
+        settings, names = await asyncio.to_thread(self._read_guild_cache, guild_id)
         self._settings_cache[guild_id] = settings
         self._room_name_cache.update({(guild_id, user_id): name for user_id, name in names.items()})
         self._room_names_loaded.add(guild_id)
@@ -844,13 +839,13 @@ class PermanentVoiceMaster(commands.Bot):
         return self.db.get_settings(guild_id), self.db.get_room_name_preferences(guild_id)
 
     async def get_voice_time(self, guild_id: int, user_id: int) -> int:
-        return await self.db_call(self.db.get_voice_time, guild_id, user_id)
+        return await asyncio.to_thread(self.db.get_voice_time, guild_id, user_id)
 
     async def get_personal_voice_breakdown(self, guild_id: int, user_id: int, days: int = 30) -> tuple[list[int], list[int], list[dict]]:
         now = time.time()
         since = now - days * 86400
         since_iso = datetime.fromtimestamp(since, timezone.utc).isoformat()
-        sessions = await self.db_call(self.db.get_voice_sessions_since, guild_id, user_id, since_iso)
+        sessions = await asyncio.to_thread(self.db.get_voice_sessions_since, guild_id, user_id, since_iso)
         hourly = [0] * 24
         session_counts = [0] * 24
         rooms: dict[int, int] = {}
@@ -888,10 +883,10 @@ class PermanentVoiceMaster(commands.Bot):
         channel_ids = list({int(room["channel_id"]) for room in rooms if room.get("channel_id")})
         if not channel_ids:
             return {}
-        return await self.db_call(self.db.get_voice_room_names, guild_id, channel_ids)
+        return await asyncio.to_thread(self.db.get_voice_room_names, guild_id, channel_ids)
 
     async def get_voice_companions(self, guild_id: int, user_id: int, limit: int = 5) -> list[dict]:
-        rows = await self.db_call(self.db.get_voice_companion_leaderboard, guild_id, user_id, limit)
+        rows = await asyncio.to_thread(self.db.get_voice_companion_leaderboard, guild_id, user_id, limit)
         return [
             {
                 "user_id": int(row["user_id"]),
@@ -907,7 +902,7 @@ class PermanentVoiceMaster(commands.Bot):
         for days in (1, 7, 14):
             since_epoch = now - days * 86400
             since_iso = datetime.fromtimestamp(since_epoch, timezone.utc).isoformat()
-            sessions = await self.db_call(self.db.get_voice_time_periods, guild_id, user_id, since_iso)
+            sessions = await asyncio.to_thread(self.db.get_voice_time_periods, guild_id, user_id, since_iso)
             seconds = 0
             for session in sessions:
                 started = datetime.fromisoformat(session["started_at"].replace("Z", "+00:00")).timestamp()
@@ -927,7 +922,7 @@ class PermanentVoiceMaster(commands.Bot):
         key = (member.guild.id, member.id)
         started = started_at or time.time()
         try:
-            await self.db_call(
+            await asyncio.to_thread(
                 self.db.start_voice_session,
                 member.guild.id,
                 member.guild.name,
@@ -949,7 +944,7 @@ class PermanentVoiceMaster(commands.Bot):
             return
         ended = max(started, ended_at or time.time())
         try:
-            await self.db_call(
+            await asyncio.to_thread(
                 self.db.close_voice_session,
                 guild_id,
                 user_id,
@@ -976,7 +971,7 @@ class PermanentVoiceMaster(commands.Bot):
             seen_at = datetime.now(timezone.utc).isoformat()
             for guild_id, user_ids in by_guild.items():
                 try:
-                    await self.db_call(self.db.touch_voice_sessions, guild_id, user_ids, seen_at)
+                    await asyncio.to_thread(self.db.touch_voice_sessions, guild_id, user_ids, seen_at)
                 except Exception as exc:
                     await report_error(f"voice heartbeat guild {guild_id}", exc)
 
@@ -1004,15 +999,14 @@ class PermanentVoiceMaster(commands.Bot):
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
             self._chart_executor = None
-        self._db_executor.shutdown(wait=False, cancel_futures=True)
         await super().close()
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s (%s)", self.user, self.user.id if self.user else "unknown")
         await asyncio.gather(*(self._load_guild_cache(guild.id) for guild in self.guilds))
         saved_rooms, saved_voice_channels = await asyncio.gather(
-            self.db_call(self.db.get_rooms),
-            self.db_call(self.db.get_voice_channels),
+            asyncio.to_thread(self.db.get_rooms),
+            asyncio.to_thread(self.db.get_voice_channels),
         )
         self._managed_rooms = {item["channel_id"]: item for item in saved_rooms}
         self._voice_channels = {item["guild_id"]: item["channel_id"] for item in saved_voice_channels}
@@ -1045,7 +1039,7 @@ class PermanentVoiceMaster(commands.Bot):
                 for member in channel.members:
                     if not member.bot:
                         observed[(guild.id, member.id)] = (member, channel)
-        active_sessions = await self.db_call(self.db.get_active_voice_sessions)
+        active_sessions = await asyncio.to_thread(self.db.get_active_voice_sessions)
         active_by_member = {(int(row["guild_id"]), int(row["user_id"])): row for row in active_sessions}
         now = time.time()
         attached: set[tuple[int, int]] = set()
@@ -1058,7 +1052,7 @@ class PermanentVoiceMaster(commands.Bot):
                 attached.add(key)
                 continue
             last_seen = datetime.fromisoformat(row["last_seen_at"].replace("Z", "+00:00")).timestamp()
-            await self.db_call(
+            await asyncio.to_thread(
                 self.db.close_voice_session,
                 key[0], key[1],
                 datetime.fromtimestamp(max(datetime.fromisoformat(row["started_at"].replace("Z", "+00:00")).timestamp(), last_seen), timezone.utc).isoformat(),
@@ -1075,7 +1069,7 @@ class PermanentVoiceMaster(commands.Bot):
             return
         await self._close_voice_session(member.guild.id, member.id, "member_departed")
         try:
-            await self.db_call(
+            await asyncio.to_thread(
                 self.db.mark_member_departed,
                 member.guild.id,
                 member.id,
@@ -1107,7 +1101,7 @@ class PermanentVoiceMaster(commands.Bot):
         if not isinstance(channel, discord.VoiceChannel):
             return
         try:
-            await self.db_call(
+            await asyncio.to_thread(
                 self.db.close_channel_voice_sessions,
                 channel.id,
                 datetime.now(timezone.utc).isoformat(),
@@ -1137,11 +1131,11 @@ class PermanentVoiceMaster(commands.Bot):
 
         try:
             await channel.delete(reason="VoiceMaster cleanup: empty room without another bot")
-            await self.db_call(self.db.delete_room, channel.id)
+            self.db.delete_room(channel.id)
             self._managed_rooms.pop(channel.id, None)
             log.info("Deleted empty room %s (no other bot present)", channel.id)
         except discord.NotFound:
-            await self.db_call(self.db.delete_room, channel.id)
+            self.db.delete_room(channel.id)
             self._managed_rooms.pop(channel.id, None)
         except discord.Forbidden:
             log.exception("Missing Manage Channels permission to delete empty room %s", channel.id)
@@ -1157,7 +1151,7 @@ class PermanentVoiceMaster(commands.Bot):
             channel = guild.get_channel(room["channel_id"])
             if not isinstance(channel, discord.VoiceChannel):
                 if channel is None:
-                    await self.db_call(self.db.delete_room, room["channel_id"])
+                    self.db.delete_room(room["channel_id"])
                     self._managed_rooms.pop(room["channel_id"], None)
                     log.info("Removed stale room record %s (channel no longer exists)", room["channel_id"])
                 continue
@@ -1170,7 +1164,7 @@ class PermanentVoiceMaster(commands.Bot):
         room: Optional[dict] = None,
     ) -> None:
         if room is None:
-            room = await self.db_call(self.db.get_room, channel.id)
+            room = self.db.get_room(channel.id)
         try:
             await channel.send(embed=build_room_embed(channel, owner.guild, room), view=RoomControlView())
             log.info("Posted control panel in voice channel chat %s", channel.id)
@@ -1185,7 +1179,7 @@ class PermanentVoiceMaster(commands.Bot):
     async def _create_rooms_for_waiting_members(self) -> None:
         """Handle humans who were already in the Create Voice channel at startup."""
         for guild in self.guilds:
-            settings = await self.get_cached_settings(guild.id)
+            settings = self.get_cached_settings(guild.id)
             if not settings:
                 continue
             category = guild.get_channel(settings["category_id"])
@@ -1215,7 +1209,7 @@ class PermanentVoiceMaster(commands.Bot):
             if owned_count >= MAX_ROOMS_PER_USER:
                 await notify_room_limit(member, f"bạn đã đạt giới hạn **{MAX_ROOMS_PER_USER} room**.")
                 return
-        room_name = await self.get_cached_room_name(member.guild.id, member.id) or f"{member.display_name}'s room"
+        room_name = self.get_cached_room_name(member.guild.id, member.id) or f"{member.display_name}'s room"
         room_name = room_name[:100]
         try:
             # Add the room owner explicitly so they appear in Discord's
@@ -1247,7 +1241,7 @@ class PermanentVoiceMaster(commands.Bot):
             # Persist in the background while Discord moves the member. Supabase
             # latency should not make the member wait before entering the room.
             persist_task = asyncio.create_task(
-                self.db_call(self.db.add_room, room.id, member.guild.id, member.id)
+                asyncio.to_thread(self.db.add_room, room.id, member.guild.id, member.id)
             )
             try:
                 await member.move_to(room, reason="VoiceMaster auto room")
@@ -1270,7 +1264,7 @@ class PermanentVoiceMaster(commands.Bot):
                     self._remember_room_creation(key)
                     return
                 await persist_task
-                await self.db_call(self.db.delete_room, room.id)
+                self.db.delete_room(room.id)
                 self._managed_rooms.pop(room.id, None)
                 try:
                     await room.delete(reason="Rollback: unable to move member into new room")
@@ -1279,7 +1273,7 @@ class PermanentVoiceMaster(commands.Bot):
                 raise
             except discord.HTTPException:
                 await persist_task
-                await self.db_call(self.db.delete_room, room.id)
+                self.db.delete_room(room.id)
                 self._managed_rooms.pop(room.id, None)
                 try:
                     await room.delete(reason="Rollback: unable to move member into new room")
@@ -1328,7 +1322,7 @@ class PermanentVoiceMaster(commands.Bot):
             # Runs for both humans and bots, so another bot leaving can trigger cleanup.
             await self._cleanup_empty_room(before.channel)
 
-        settings = await self.get_cached_settings(member.guild.id)
+        settings = self.get_cached_settings(member.guild.id)
         if settings and before.channel and before.channel.id == settings["trigger_channel_id"] and before.channel != after.channel:
             self._trigger_attempts.discard((member.guild.id, member.id))
 
