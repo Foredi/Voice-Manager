@@ -21,7 +21,7 @@ A Discord bot that automatically creates a personal voice channel when a member 
 - `/room panel` opens an embed dashboard for the room the user is currently in. Dropdowns edit the room name, user limit, lock state, and visibility; buttons refresh the panel, transfer ownership, or delete the room.
 - `/room claim` lets a member claim a room if its previous owner has left the server; admins can also claim it.
 - `ret voice_time` shows your personal dashboard with a smooth PNG chart for voice minutes and session starts by hour, time totals for 1, 7, and 14 days, your top rooms over the last 30 days, and the top 5 people whose voice sessions overlapped with yours in the same room. Add `@member` to view another member.
-- Voice sessions are stored as durable warehouse facts with guild, member, and room dimensions. Open sessions are heartbeated and resumed after restarts; departed members and deleted rooms do not erase history. `Matplotlib` renders the chart image.
+- Voice sessions are stored as durable warehouse facts with guild, member, and room dimensions. Open sessions are heartbeated and resumed after restarts; departed members and deleted rooms do not erase history. Chart rendering runs in a recyclable worker process, and session-history reads are paginated to keep memory use bounded. Deleted rooms use their saved name when available and are omitted if no name was recorded.
 - `/room restore owner:<member>` lets an administrator restore management for an existing room and repost its control embed if its database record was lost.
 - `/room delete` deletes the current room after confirmation.
 - Multiple servers are supported.

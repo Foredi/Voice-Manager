@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+from collections import deque
 import io
 import logging
 import os
@@ -72,6 +74,7 @@ def build_voice_activity_embed(
     rooms: list[dict],
     current_room_seconds: int,
     companions: list[dict],
+    room_names: Optional[dict[int, str]] = None,
 ) -> discord.Embed:
     embed = discord.Embed(
         title="Voice Activity",
@@ -84,10 +87,14 @@ def build_voice_activity_embed(
     room_lines = []
     current_channel_id = member.voice.channel.id if member.voice and member.voice.channel else None
     current_room_seen = False
-    for item in rooms[:5]:
-        channel = member.guild.get_channel(item["channel_id"])
-        name = channel.mention if channel else f"Room đã xóa (`{item['channel_id']}`)"
-        is_current = item["channel_id"] == current_channel_id
+    room_names = room_names or {}
+    for item in rooms:
+        channel_id = int(item["channel_id"])
+        channel = member.guild.get_channel(channel_id)
+        if channel is None and channel_id != current_channel_id and channel_id not in room_names:
+            continue
+        name = channel.mention if channel else discord.utils.escape_markdown(room_names.get(channel_id, "Room voice"))
+        is_current = channel_id == current_channel_id
         current_room_seen = current_room_seen or is_current
         marker = "🔊 " if is_current else ""
         room_lines.append(f"{marker}{name} · **{format_duration(item['total_seconds'])}**")
@@ -786,8 +793,11 @@ class PermanentVoiceMaster(commands.Bot):
         self._managed_rooms: dict[int, dict] = {}
         self._voice_channels: dict[int, int] = {}
         self._last_room_create: dict[tuple[int, int], float] = {}
+        self._last_room_create_order: deque[tuple[tuple[int, int], float]] = deque()
         self._voice_sessions: dict[tuple[int, int], float] = {}
         self._voice_session_channels: dict[tuple[int, int], int] = {}
+        self._chart_executor: Optional[concurrent.futures.ProcessPoolExecutor] = None
+        self._voice_heartbeat_task: Optional[asyncio.Task] = None
 
     def get_cached_settings(self, guild_id: int):
         # Cache is loaded when the bot becomes ready and updated by /setup.
@@ -802,6 +812,22 @@ class PermanentVoiceMaster(commands.Bot):
         if key not in self._room_name_cache:
             self._room_name_cache[key] = self.db.get_room_name_preference(guild_id, user_id)
         return self._room_name_cache[key]
+
+    def _prune_room_create_cache(self) -> None:
+        cutoff = time.monotonic() - ROOM_CREATE_COOLDOWN
+        while self._last_room_create_order:
+            key, created_at = self._last_room_create_order[0]
+            if created_at > cutoff and len(self._last_room_create) <= 5000:
+                break
+            self._last_room_create_order.popleft()
+            if self._last_room_create.get(key) == created_at:
+                self._last_room_create.pop(key, None)
+
+    def _remember_room_creation(self, key: tuple[int, int]) -> None:
+        created_at = time.monotonic()
+        self._last_room_create[key] = created_at
+        self._last_room_create_order.append((key, created_at))
+        self._prune_room_create_cache()
 
     async def _load_guild_cache(self, guild_id: int) -> None:
         settings, names = await asyncio.to_thread(self._read_guild_cache, guild_id)
@@ -852,6 +878,12 @@ class PermanentVoiceMaster(commands.Bot):
             for channel_id, seconds in sorted(rooms.items(), key=lambda item: item[1], reverse=True)[:5]
         ]
         return hourly, session_counts, top_rooms
+
+    async def get_voice_room_names(self, guild_id: int, rooms: list[dict]) -> dict[int, str]:
+        channel_ids = list({int(room["channel_id"]) for room in rooms if room.get("channel_id")})
+        if not channel_ids:
+            return {}
+        return await asyncio.to_thread(self.db.get_voice_room_names, guild_id, channel_ids)
 
     async def get_voice_companions(self, guild_id: int, user_id: int, limit: int = 5) -> list[dict]:
         rows = await asyncio.to_thread(self.db.get_voice_companion_leaderboard, guild_id, user_id, limit)
@@ -930,7 +962,11 @@ class PermanentVoiceMaster(commands.Bot):
         while not self.is_closed():
             await asyncio.sleep(60)
             by_guild: dict[int, list[int]] = {}
-            for guild_id, user_id in self._voice_sessions:
+            for guild_id, user_id in list(self._voice_sessions):
+                if self.get_guild(guild_id) is None:
+                    self._voice_sessions.pop((guild_id, user_id), None)
+                    self._voice_session_channels.pop((guild_id, user_id), None)
+                    continue
                 by_guild.setdefault(guild_id, []).append(user_id)
             seen_at = datetime.now(timezone.utc).isoformat()
             for guild_id, user_ids in by_guild.items():
@@ -944,9 +980,26 @@ class PermanentVoiceMaster(commands.Bot):
         self.tree.add_command(RoomGroup())
         self.add_view(RoomControlView())
         synced = await self.tree.sync()
-        self._voice_heartbeat_task = asyncio.create_task(self._voice_heartbeat_loop())
+        self._chart_executor = concurrent.futures.ProcessPoolExecutor(max_workers=1, max_tasks_per_child=20)
+        if self._voice_heartbeat_task is None or self._voice_heartbeat_task.done():
+            self._voice_heartbeat_task = asyncio.create_task(self._voice_heartbeat_loop())
         log.info("Synced %s application commands", len(synced))
         log.info("Connected to Supabase database")
+
+    async def close(self) -> None:
+        task = self._voice_heartbeat_task
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            self._voice_heartbeat_task = None
+        executor = self._chart_executor
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+            self._chart_executor = None
+        await super().close()
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s (%s)", self.user, self.user.id if self.user else "unknown")
@@ -1024,6 +1077,25 @@ class PermanentVoiceMaster(commands.Bot):
             )
         except Exception as exc:
             await report_error(f"mark member departed guild {member.guild.id}, member {member.id}", exc)
+        key = (member.guild.id, member.id)
+        self._room_name_cache.pop(key, None)
+        self._last_room_create.pop(key, None)
+        self._trigger_attempts.discard(key)
+
+    async def on_guild_remove(self, guild: discord.Guild) -> None:
+        self._settings_cache.pop(guild.id, None)
+        self._room_names_loaded.discard(guild.id)
+        self._room_name_cache = {key: value for key, value in self._room_name_cache.items() if key[0] != guild.id}
+        self._managed_rooms = {key: value for key, value in self._managed_rooms.items() if value["guild_id"] != guild.id}
+        self._voice_channels.pop(guild.id, None)
+        self._last_room_create = {key: value for key, value in self._last_room_create.items() if key[0] != guild.id}
+        self._last_room_create_order = deque(
+            (entry for entry in self._last_room_create_order if entry[0][0] != guild.id), maxlen=10000
+        )
+        self._trigger_attempts = {key for key in self._trigger_attempts if key[0] != guild.id}
+        for key in [key for key in self._voice_sessions if key[0] == guild.id]:
+            self._voice_sessions.pop(key, None)
+            self._voice_session_channels.pop(key, None)
 
     async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel) -> None:
         if not isinstance(channel, discord.VoiceChannel):
@@ -1040,6 +1112,8 @@ class PermanentVoiceMaster(commands.Bot):
             if channel_id == channel.id:
                 self._voice_sessions.pop(key, None)
                 self._voice_session_channels.pop(key, None)
+        self._managed_rooms.pop(channel.id, None)
+        self._voice_channels = {guild_id: channel_id for guild_id, channel_id in self._voice_channels.items() if channel_id != channel.id}
 
     async def _cleanup_empty_room(self, channel: discord.abc.GuildChannel) -> None:
         if not isinstance(channel, discord.VoiceChannel):
@@ -1123,6 +1197,7 @@ class PermanentVoiceMaster(commands.Bot):
 
     async def _create_room_for_member(self, member: discord.Member, category: discord.CategoryChannel) -> None:
         key = (member.guild.id, member.id)
+        self._prune_room_create_cache()
         now = time.monotonic()
         last_created = self._last_room_create.get(key)
         if last_created is not None and now - last_created < ROOM_CREATE_COOLDOWN:
@@ -1186,7 +1261,7 @@ class PermanentVoiceMaster(commands.Bot):
                     )
                     await persist_task
                     await self._send_room_panel(room, member, room_data)
-                    self._last_room_create[key] = time.monotonic()
+                    self._remember_room_creation(key)
                     return
                 await persist_task
                 self.db.delete_room(room.id)
@@ -1207,7 +1282,7 @@ class PermanentVoiceMaster(commands.Bot):
                 raise
             await persist_task
             await self._send_room_panel(room, member, room_data)
-            self._last_room_create[key] = time.monotonic()
+            self._remember_room_creation(key)
             log.info("Created temporary room %s for %s in guild %s", room.id, member.id, member.guild.id)
         except discord.Forbidden:
             bot_member = member.guild.me
@@ -1290,9 +1365,10 @@ async def voice_time_prefix(ctx: commands.Context, member: Optional[discord.Memb
         companions = await bot.get_voice_companions(ctx.guild.id, target.id, 5)
     except Exception as exc:
         await report_error(f"read voice time guild {ctx.guild.id}, member {target.id}", exc)
-        await ctx.reply("Không đọc được thời gian voice. Hãy chạy SQL trong `supabase_schema.sql` rồi thử lại.", mention_author=False)
+        await ctx.reply("Không đọc được thời gian voice. Hãy kiểm tra migration `warehouse_star_schema.sql` đã chạy thành công chưa.", mention_author=False)
         return
 
+    room_names = await bot.get_voice_room_names(ctx.guild.id, rooms)
     embed = build_voice_activity_embed(
         target,
         total,
@@ -1300,8 +1376,14 @@ async def voice_time_prefix(ctx: commands.Context, member: Optional[discord.Memb
         rooms,
         bot.get_live_voice_seconds(ctx.guild.id, target.id),
         companions,
+        room_names,
     )
-    chart_image = await asyncio.to_thread(render_voice_chart, hourly, session_counts)
+    if bot._chart_executor is None:
+        chart_image = await asyncio.to_thread(render_voice_chart, hourly, session_counts)
+    else:
+        chart_image = await asyncio.get_running_loop().run_in_executor(
+            bot._chart_executor, render_voice_chart, hourly, session_counts
+        )
     embed.set_image(url="attachment://voice_activity.png")
     chart_file = discord.File(chart_image, filename="voice_activity.png")
     await ctx.reply(

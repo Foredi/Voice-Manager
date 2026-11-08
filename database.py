@@ -127,29 +127,56 @@ class Database:
         return int(data or 0)
 
     def get_voice_time_periods(self, guild_id: int, user_id: int, since_iso: str) -> list[dict]:
-        response = (
-            self.client.table("fact_voice_session")
-            .select("started_at,ended_at,duration_seconds")
-            .eq("guild_id", guild_id)
-            .eq("user_id", user_id)
-            .not_.is_("ended_at", "null")
-            .gte("ended_at", since_iso)
-            .execute()
+        return self._fetch_voice_rows(
+            "started_at,ended_at,duration_seconds", guild_id, user_id, since_iso
         )
-        return getattr(response, "data", None) or []
 
     def get_voice_sessions_since(self, guild_id: int, user_id: int, since_iso: str) -> list[dict]:
+        return self._fetch_voice_rows(
+            "channel_id,started_at,ended_at,duration_seconds", guild_id, user_id, since_iso, order=True
+        )
+
+    def _fetch_voice_rows(
+        self, columns: str, guild_id: int, user_id: int, since_iso: str, *, order: bool = False
+    ) -> list[dict]:
+        rows: list[dict] = []
+        offset = 0
+        page_size = 500
+        while True:
+            query = (
+                self.client.table("fact_voice_session")
+                .select(columns)
+                .eq("guild_id", guild_id)
+                .eq("user_id", user_id)
+                .not_.is_("ended_at", "null")
+                .gte("ended_at", since_iso)
+                .range(offset, offset + page_size - 1)
+            )
+            if order:
+                query = query.order("ended_at")
+            response = query.execute()
+            batch = getattr(response, "data", None) or []
+            rows.extend(batch)
+            if len(batch) < page_size:
+                return rows
+            offset += page_size
+
+    def get_voice_room_names(self, guild_id: int, channel_ids: list[int]) -> dict[int, str]:
+        if not channel_ids:
+            return {}
         response = (
-            self.client.table("fact_voice_session")
-            .select("channel_id,started_at,ended_at,duration_seconds")
+            self.client.table("dim_voice_channel")
+            .select("channel_id,channel_name")
             .eq("guild_id", guild_id)
-            .eq("user_id", user_id)
-            .not_.is_("ended_at", "null")
-            .gte("ended_at", since_iso)
-            .order("ended_at")
+            .in_("channel_id", channel_ids)
             .execute()
         )
-        return getattr(response, "data", None) or []
+        rows = getattr(response, "data", None) or []
+        return {
+            int(row["channel_id"]): row["channel_name"]
+            for row in rows
+            if row.get("channel_name")
+        }
 
     def get_voice_companion_leaderboard(self, guild_id: int, user_id: int, limit: int = 5) -> list[dict]:
         response = self.client.rpc(
