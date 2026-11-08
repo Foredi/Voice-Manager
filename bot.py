@@ -99,9 +99,9 @@ def build_voice_activity_embed(
     companion_lines = []
     for rank, item in enumerate(companions[:5], 1):
         other = member.guild.get_member(item["user_id"])
-        display = other.mention if other else f"<@{item['user_id']}>"
+        display = other.mention if other else f"{discord.utils.escape_markdown(item.get('member_name') or 'Former member')} (`{item['user_id']}`)"
         companion_lines.append(f"**{rank}.** {display} · **{format_duration(item['total_seconds'])}** cùng voice")
-    embed.add_field(name="Bạn thường treo voice cùng", value="\n".join(companion_lines) or "Chưa có dữ liệu người cùng phòng.", inline=False)
+    embed.add_field(name="Người bạn đã treo voice cùng · tất cả thời gian", value="\n".join(companion_lines) or "Chưa có dữ liệu người cùng phòng.", inline=False)
     embed.add_field(name="Tổng tích lũy", value=f"**{format_duration(total_seconds)}**", inline=True)
     if member.voice and member.voice.channel:
         voice_location = f"Đang ở {member.voice.channel.mention} · {format_duration(current_room_seconds)} trong phiên này"
@@ -855,23 +855,13 @@ class PermanentVoiceMaster(commands.Bot):
 
     async def get_voice_companions(self, guild_id: int, user_id: int, limit: int = 5) -> list[dict]:
         rows = await asyncio.to_thread(self.db.get_voice_companion_leaderboard, guild_id, user_id, limit)
-        seconds_by_user = {int(row["user_id"]): int(row["total_seconds"]) for row in rows}
-        target_key = (guild_id, user_id)
-        target_start = self._voice_sessions.get(target_key)
-        target_channel = self._voice_session_channels.get(target_key)
-        if target_start is not None and target_channel is not None:
-            now = time.time()
-            for other_key, other_start in self._voice_sessions.items():
-                other_guild, other_user = other_key
-                if other_guild != guild_id or other_user == user_id:
-                    continue
-                if self._voice_session_channels.get(other_key) != target_channel:
-                    continue
-                overlap = max(0, int(now - max(target_start, other_start)))
-                seconds_by_user[other_user] = seconds_by_user.get(other_user, 0) + overlap
         return [
-            {"user_id": other_user, "total_seconds": seconds}
-            for other_user, seconds in sorted(seconds_by_user.items(), key=lambda item: item[1], reverse=True)[:limit]
+            {
+                "user_id": int(row["user_id"]),
+                "member_name": row.get("member_name"),
+                "total_seconds": int(row["total_seconds"]),
+            }
+            for row in rows
         ]
 
     async def get_voice_time_periods(self, guild_id: int, user_id: int) -> dict[int, int]:
@@ -896,30 +886,65 @@ class PermanentVoiceMaster(commands.Bot):
         started = self._voice_sessions.get((guild_id, user_id))
         return max(0, int(time.time() - started)) if started is not None else 0
 
-    async def _close_voice_session(self, guild_id: int, user_id: int) -> None:
-        started = self._voice_sessions.pop((guild_id, user_id), None)
-        channel_id = self._voice_session_channels.pop((guild_id, user_id), None)
-        if started is None or channel_id is None:
-            return
-        ended = time.time()
+    async def _start_voice_session(self, member: discord.Member, channel: discord.VoiceChannel, started_at: Optional[float] = None) -> None:
+        key = (member.guild.id, member.id)
+        started = started_at or time.time()
         try:
             await asyncio.to_thread(
-                self.db.add_voice_session,
+                self.db.start_voice_session,
+                member.guild.id,
+                member.guild.name,
+                member.id,
+                member.display_name,
+                member.bot,
+                channel.id,
+                channel.name,
+                datetime.fromtimestamp(started, timezone.utc).isoformat(),
+            )
+            self._voice_sessions[key] = started
+            self._voice_session_channels[key] = channel.id
+        except Exception as exc:
+            await report_error(f"start voice session guild {member.guild.id}, member {member.id}", exc)
+
+    async def _close_voice_session(self, guild_id: int, user_id: int, reason: str = "voice_leave", ended_at: Optional[float] = None) -> None:
+        started = self._voice_sessions.get((guild_id, user_id))
+        if started is None:
+            return
+        ended = max(started, ended_at or time.time())
+        try:
+            await asyncio.to_thread(
+                self.db.close_voice_session,
                 guild_id,
                 user_id,
-                channel_id,
-                datetime.fromtimestamp(started, timezone.utc).isoformat(),
                 datetime.fromtimestamp(ended, timezone.utc).isoformat(),
-                max(0, int(ended - started)),
+                reason,
             )
+            self._voice_sessions.pop((guild_id, user_id), None)
+            self._voice_session_channels.pop((guild_id, user_id), None)
         except Exception as exc:
-            await report_error(f"save voice session guild {guild_id}, member {user_id}", exc)
+            self._voice_sessions.pop((guild_id, user_id), None)
+            self._voice_session_channels.pop((guild_id, user_id), None)
+            await report_error(f"close voice session guild {guild_id}, member {user_id}", exc)
+
+    async def _voice_heartbeat_loop(self) -> None:
+        while not self.is_closed():
+            await asyncio.sleep(60)
+            by_guild: dict[int, list[int]] = {}
+            for guild_id, user_id in self._voice_sessions:
+                by_guild.setdefault(guild_id, []).append(user_id)
+            seen_at = datetime.now(timezone.utc).isoformat()
+            for guild_id, user_ids in by_guild.items():
+                try:
+                    await asyncio.to_thread(self.db.touch_voice_sessions, guild_id, user_ids, seen_at)
+                except Exception as exc:
+                    await report_error(f"voice heartbeat guild {guild_id}", exc)
 
     async def setup_hook(self) -> None:
         self.tree.add_command(VoiceMasterGroup())
         self.tree.add_command(RoomGroup())
         self.add_view(RoomControlView())
         synced = await self.tree.sync()
+        self._voice_heartbeat_task = asyncio.create_task(self._voice_heartbeat_loop())
         log.info("Synced %s application commands", len(synced))
         log.info("Connected to Supabase database")
 
@@ -954,14 +979,67 @@ class PermanentVoiceMaster(commands.Bot):
                 await post_webhook(ERROR_WEBHOOK_URL, f"**VoiceMaster voice reconnect failed**\nGuild `{guild.id}`, channel `{channel.id}`. Check View Channel and Connect permissions.")
         await self._cleanup_stale_rooms()
         await self._create_rooms_for_waiting_members()
-        session_start = time.time()
+
+        observed: dict[tuple[int, int], tuple[discord.Member, discord.VoiceChannel]] = {}
         for guild in self.guilds:
             for channel in guild.voice_channels:
                 for member in channel.members:
                     if not member.bot:
-                        key = (guild.id, member.id)
-                        self._voice_sessions.setdefault(key, session_start)
-                        self._voice_session_channels.setdefault(key, channel.id)
+                        observed[(guild.id, member.id)] = (member, channel)
+        active_sessions = await asyncio.to_thread(self.db.get_active_voice_sessions)
+        active_by_member = {(int(row["guild_id"]), int(row["user_id"])): row for row in active_sessions}
+        now = time.time()
+        attached: set[tuple[int, int]] = set()
+        for key, row in active_by_member.items():
+            present = observed.get(key)
+            if present and present[1].id == int(row["channel_id"]):
+                started = datetime.fromisoformat(row["started_at"].replace("Z", "+00:00")).timestamp()
+                self._voice_sessions[key] = started
+                self._voice_session_channels[key] = int(row["channel_id"])
+                attached.add(key)
+                continue
+            last_seen = datetime.fromisoformat(row["last_seen_at"].replace("Z", "+00:00")).timestamp()
+            await asyncio.to_thread(
+                self.db.close_voice_session,
+                key[0], key[1],
+                datetime.fromtimestamp(max(datetime.fromisoformat(row["started_at"].replace("Z", "+00:00")).timestamp(), last_seen), timezone.utc).isoformat(),
+                "startup_reconcile",
+            )
+            self._voice_sessions.pop(key, None)
+            self._voice_session_channels.pop(key, None)
+        for key, (member, channel) in observed.items():
+            if key not in attached:
+                await self._start_voice_session(member, channel, now)
+
+    async def on_member_remove(self, member: discord.Member) -> None:
+        if member.bot:
+            return
+        await self._close_voice_session(member.guild.id, member.id, "member_departed")
+        try:
+            await asyncio.to_thread(
+                self.db.mark_member_departed,
+                member.guild.id,
+                member.id,
+                datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception as exc:
+            await report_error(f"mark member departed guild {member.guild.id}, member {member.id}", exc)
+
+    async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel) -> None:
+        if not isinstance(channel, discord.VoiceChannel):
+            return
+        try:
+            await asyncio.to_thread(
+                self.db.close_channel_voice_sessions,
+                channel.id,
+                datetime.now(timezone.utc).isoformat(),
+            )
+        except Exception as exc:
+            await report_error(f"close sessions for deleted voice channel {channel.id}", exc)
+        for key, channel_id in list(self._voice_session_channels.items()):
+            if channel_id == channel.id:
+                self._voice_sessions.pop(key, None)
+                self._voice_session_channels.pop(key, None)
 
     async def _cleanup_empty_room(self, channel: discord.abc.GuildChannel) -> None:
         if not isinstance(channel, discord.VoiceChannel):
@@ -1161,10 +1239,9 @@ class PermanentVoiceMaster(commands.Bot):
         if not member.bot and before.channel != after.channel:
             key = (member.guild.id, member.id)
             if before.channel is not None:
-                await self._close_voice_session(*key)
-            if after.channel is not None:
-                self._voice_sessions[key] = time.time()
-                self._voice_session_channels[key] = after.channel.id
+                await self._close_voice_session(*key, reason="voice_leave_or_move")
+            if isinstance(after.channel, discord.VoiceChannel):
+                await self._start_voice_session(member, after.channel)
 
         if before.channel is not None and before.channel != after.channel:
             # Runs for both humans and bots, so another bot leaving can trigger cleanup.
@@ -1216,7 +1293,6 @@ async def voice_time_prefix(ctx: commands.Context, member: Optional[discord.Memb
         await ctx.reply("Không đọc được thời gian voice. Hãy chạy SQL trong `supabase_schema.sql` rồi thử lại.", mention_author=False)
         return
 
-    total += bot.get_live_voice_seconds(ctx.guild.id, target.id)
     embed = build_voice_activity_embed(
         target,
         total,

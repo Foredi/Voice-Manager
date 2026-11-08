@@ -44,40 +44,95 @@ class Database:
     def clear_voice_channel(self, guild_id: int) -> None:
         self.client.table("voice_presence").delete().eq("guild_id", guild_id).execute()
 
-    def add_voice_session(self, guild_id: int, user_id: int, channel_id: int, started_at: str, ended_at: str, seconds: int) -> None:
-        if seconds <= 0:
-            return
-        self.client.table("voice_time_sessions").insert({
-            "guild_id": guild_id,
-            "user_id": user_id,
-            "channel_id": channel_id,
-            "started_at": started_at,
-            "ended_at": ended_at,
-            "duration_seconds": seconds,
+    def start_voice_session(
+        self,
+        guild_id: int,
+        guild_name: str,
+        user_id: int,
+        member_name: str,
+        is_bot: bool,
+        channel_id: int,
+        channel_name: str,
+        started_at: str,
+    ) -> None:
+        self.client.rpc("start_voice_session", {
+            "p_guild_id": guild_id,
+            "p_guild_name": guild_name,
+            "p_user_id": user_id,
+            "p_member_name": member_name,
+            "p_is_bot": is_bot,
+            "p_channel_id": channel_id,
+            "p_channel_name": channel_name,
+            "p_started_at": started_at,
         }).execute()
-        self.client.rpc(
-            "increment_voice_time",
-            {"p_guild_id": guild_id, "p_user_id": user_id, "p_seconds": seconds},
-        ).execute()
+
+    def close_voice_session(self, guild_id: int, user_id: int, ended_at: str, reason: str) -> None:
+        self.client.rpc("close_voice_session", {
+            "p_guild_id": guild_id,
+            "p_user_id": user_id,
+            "p_ended_at": ended_at,
+            "p_reason": reason,
+        }).execute()
+
+    def close_channel_voice_sessions(self, channel_id: int, ended_at: str) -> None:
+        self.client.rpc("close_channel_voice_sessions", {
+            "p_channel_id": channel_id,
+            "p_ended_at": ended_at,
+        }).execute()
+
+    def touch_voice_sessions(self, guild_id: int, user_ids: list[int], seen_at: str) -> None:
+        if not user_ids:
+            return
+        self.client.rpc("touch_voice_sessions", {
+            "p_guild_id": guild_id,
+            "p_user_ids": user_ids,
+            "p_seen_at": seen_at,
+        }).execute()
+
+    def get_active_voice_sessions(self) -> list[dict]:
+        rows: list[dict] = []
+        offset = 0
+        page_size = 1000
+        while True:
+            response = (
+                self.client.table("fact_voice_session")
+                .select("guild_id,user_id,channel_id,started_at,last_seen_at")
+                .is_("ended_at", "null")
+                .range(offset, offset + page_size - 1)
+                .execute()
+            )
+            batch = getattr(response, "data", None) or []
+            rows.extend(batch)
+            if len(batch) < page_size:
+                return rows
+            offset += page_size
+
+    def mark_member_departed(self, guild_id: int, user_id: int, departed_at: str) -> None:
+        self.client.rpc("mark_member_departed", {
+            "p_guild_id": guild_id,
+            "p_user_id": user_id,
+            "p_departed_at": departed_at,
+        }).execute()
 
     def get_voice_time(self, guild_id: int, user_id: int) -> int:
-        response = (
-            self.client.table("voice_time")
-            .select("total_seconds")
-            .eq("guild_id", guild_id)
-            .eq("user_id", user_id)
-            .limit(1)
-            .execute()
-        )
-        rows = getattr(response, "data", None) or []
-        return int(rows[0]["total_seconds"]) if rows else 0
+        response = self.client.rpc("get_voice_total", {
+            "p_guild_id": guild_id,
+            "p_user_id": user_id,
+        }).execute()
+        data = getattr(response, "data", 0)
+        if isinstance(data, list):
+            data = data[0] if data else 0
+        if isinstance(data, dict):
+            data = next(iter(data.values()), 0)
+        return int(data or 0)
 
     def get_voice_time_periods(self, guild_id: int, user_id: int, since_iso: str) -> list[dict]:
         response = (
-            self.client.table("voice_time_sessions")
+            self.client.table("fact_voice_session")
             .select("started_at,ended_at,duration_seconds")
             .eq("guild_id", guild_id)
             .eq("user_id", user_id)
+            .not_.is_("ended_at", "null")
             .gte("ended_at", since_iso)
             .execute()
         )
@@ -85,10 +140,11 @@ class Database:
 
     def get_voice_sessions_since(self, guild_id: int, user_id: int, since_iso: str) -> list[dict]:
         response = (
-            self.client.table("voice_time_sessions")
+            self.client.table("fact_voice_session")
             .select("channel_id,started_at,ended_at,duration_seconds")
             .eq("guild_id", guild_id)
             .eq("user_id", user_id)
+            .not_.is_("ended_at", "null")
             .gte("ended_at", since_iso)
             .order("ended_at")
             .execute()
@@ -104,7 +160,7 @@ class Database:
 
     def get_voice_seconds_since(self, guild_id: int, user_id: int, since_iso: str) -> int:
         response = (
-            self.client.table("voice_time_sessions")
+            self.client.table("fact_voice_session")
             .select("duration_seconds")
             .eq("guild_id", guild_id)
             .eq("user_id", user_id)

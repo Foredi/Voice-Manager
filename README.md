@@ -21,7 +21,7 @@ A Discord bot that automatically creates a personal voice channel when a member 
 - `/room panel` opens an embed dashboard for the room the user is currently in. Dropdowns edit the room name, user limit, lock state, and visibility; buttons refresh the panel, transfer ownership, or delete the room.
 - `/room claim` lets a member claim a room if its previous owner has left the server; admins can also claim it.
 - `ret voice_time` shows your personal dashboard with a smooth PNG chart for voice minutes and session starts by hour, time totals for 1, 7, and 14 days, your top rooms over the last 30 days, and the top 5 people whose voice sessions overlapped with yours in the same room. Add `@member` to view another member.
-- Voice sessions store room IDs and timestamps. Re-run `supabase_schema.sql` after updating so new sessions can be grouped by room and voice companion time can be calculated. Matplotlib renders the chart image.
+- Voice sessions are stored as durable warehouse facts with guild, member, and room dimensions. Open sessions are heartbeated and resumed after restarts; departed members and deleted rooms do not erase history. `Matplotlib` renders the chart image.
 - `/room restore owner:<member>` lets an administrator restore management for an existing room and repost its control embed if its database record was lost.
 - `/room delete` deletes the current room after confirmation.
 - Multiple servers are supported.
@@ -48,7 +48,7 @@ pip install -r requirements.txt
 
 Set `DISCORD_TOKEN`, `SUPABASE_URL`, and `SUPABASE_KEY` in `.env`. `SUPABASE_KEY` must be the project's service role key because the bot accesses the database server-side while Row Level Security is enabled. Keep it private and never commit `.env`. Optional settings: `ERROR_WEBHOOK_URL`, `AUDIT_WEBHOOK_URL`, `ROOM_CREATE_COOLDOWN=30`, and `MAX_ROOMS_PER_USER=3` (set the cap to `0` for no cap). Discord webhook URLs are secrets; keep them private.
 
-Before starting the bot, run the entire [`supabase_schema.sql`](supabase_schema.sql) file in the Supabase SQL Editor for the same project as `SUPABASE_URL`. It creates the tables and refreshes the REST schema cache. If you already installed this bot, run the updated SQL file again to create the voice activity tables. To import existing SQLite data, install requirements, then run `python migrate_sqlite_to_supabase.py` once. The migration reads `DATABASE_PATH` (default `data/voicemaster.sqlite3`), upserts the rows, and leaves the SQLite file unchanged. Verify the imported data before retiring the SQLite backup.
+Stop the current bot, then run [`warehouse_star_schema.sql`](warehouse_star_schema.sql) in the Supabase SQL Editor for the same project as `SUPABASE_URL`. It is safe to re-run and migrates prior `voice_time` totals and session rows into the warehouse while retaining the old tables. Legacy totals without session timestamps remain in a separate fact table, so lifetime totals are preserved without inventing room or companion history. New voice sessions are written when a member joins, heartbeated every minute, and closed on leave, room move/deletion, member departure, or startup reconciliation. Install requirements and start the updated `bot.py` after the schema completes.
 
 ```bash
 python bot.py
