@@ -54,6 +54,22 @@ Stop the current bot, then run [`warehouse_star_schema.sql`](warehouse_star_sche
 python bot.py
 ```
 
+## Project structure
+
+```text
+app/
+├── bot.py                         # Bot class, lifecycle, and shared runtime state
+├── core/                          # Environment configuration and Discord helpers
+└── features/
+    ├── voicemaster/               # /voicemaster setup and voice configuration
+    ├── rooms/                     # /room commands and interactive room controls
+    └── voice_activity/            # ret voice_time command, chart, and presentation
+bot.py                             # Application entry point
+database.py                        # Supabase data access
+```
+
+New feature areas should live under `app/features/<feature_name>/`. Put shared Discord/runtime helpers under `app/core/`, and keep database queries in `database.py` until the repository grows enough to split by data domain. The existing `python bot.py` startup command and Discord command names remain unchanged.
+
 Invite the bot with the `bot` and `applications.commands` scopes and the permissions listed above. Then run `/voicemaster setup` in your Discord server as an administrator with Manage Server permission.
 
 ## Important behavior
