@@ -25,6 +25,7 @@ A Discord bot that automatically creates a personal voice channel when a member 
 - `/room restore owner:<member>` lets an administrator restore management for an existing room and repost its control embed if its database record was lost.
 - `/room delete` deletes the current room after confirmation.
 - Multiple servers are supported.
+- `/poll template_create` opens an interactive embed editor with buttons for content/color, author, footer, and images, plus preview and save. `/poll create` opens a form for a single or multiple choice poll and a duration in minutes (`0` means no limit). Answers get colorful default emojis in the preview; use **Emoji đáp án** there to assign server emojis before publishing. Choose an answer by button, then select a server emoji to apply it immediately. Custom emoji choices appear in both the embed and vote menu. A draft can save the design as a reusable server template. The newest template is applied automatically to the next poll; a draft menu can switch to another saved design. `/poll templates` lists saved designs and `/poll template_delete name:<name>` removes one. Votes update the Discord embed immediately from the bot's warm vote cache; Supabase persistence runs in the background with retries. `/poll end [poll_id]` lets the creator or a server manager close a poll. Expiring polls are closed by the bot and reconciled after restart.
 
 ## Requirements
 
@@ -48,7 +49,7 @@ pip install -r requirements.txt
 
 Set `DISCORD_TOKEN`, `SUPABASE_URL`, and `SUPABASE_KEY` in `.env`. `SUPABASE_KEY` must be the project's service role key because the bot accesses the database server-side while Row Level Security is enabled. Keep it private and never commit `.env`. Optional settings: `ERROR_WEBHOOK_URL`, `AUDIT_WEBHOOK_URL`, `ROOM_CREATE_COOLDOWN=30`, and `MAX_ROOMS_PER_USER=3` (set the cap to `0` for no cap). Discord webhook URLs are secrets; keep them private.
 
-Stop the current bot, then run [`warehouse_star_schema.sql`](warehouse_star_schema.sql) in the Supabase SQL Editor for the same project as `SUPABASE_URL`. It is safe to re-run and migrates prior `voice_time` totals and session rows into the warehouse while retaining the old tables. Legacy totals without session timestamps remain in a separate fact table, so lifetime totals are preserved without inventing room or companion history. New voice sessions are written when a member joins, heartbeated every minute, and closed on leave, room move/deletion, member departure, or startup reconciliation. Install requirements and start the updated `bot.py` after the schema completes.
+Stop the current bot, then run [`warehouse_star_schema.sql`](warehouse_star_schema.sql) in the Supabase SQL Editor for the same project as `SUPABASE_URL`. It is safe to re-run and migrates prior `voice_time` totals and session rows into the warehouse while retaining the old tables; it also creates the poll tables and vote RPC. Legacy totals without session timestamps remain in a separate fact table, so lifetime totals are preserved without inventing room or companion history. New voice sessions are written when a member joins, heartbeated every minute, and closed on leave, room move/deletion, member departure, or startup reconciliation. Install requirements and start the updated `bot.py` after the schema completes.
 
 ```bash
 python bot.py

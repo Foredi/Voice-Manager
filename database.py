@@ -158,6 +158,105 @@ class Database:
         ).execute()
         return getattr(response, "data", None) or []
 
+    # Poll tables are installed by the poll section in warehouse_star_schema.sql.
+    def create_poll(self, poll: dict, options: list[dict]) -> None:
+        self.client.table("polls").insert(poll).execute()
+        if options:
+            self.client.table("poll_options").insert(options).execute()
+
+    def get_poll(self, poll_id: str) -> Optional[dict]:
+        response = self.client.table("polls").select("*").eq("id", poll_id).limit(1).execute()
+        rows = getattr(response, "data", None) or []
+        if not rows:
+            return None
+        poll = rows[0]
+        result = self.client.table("poll_options").select("*").eq("poll_id", poll_id).order("position").execute()
+        poll["options"] = getattr(result, "data", None) or []
+        return poll
+
+    def list_active_polls(self, guild_id: Optional[int] = None) -> list[dict]:
+        rows: list[dict] = []
+        offset = 0
+        page_size = 1000
+        while True:
+            query = self.client.table("polls").select("*").eq("ended", False)
+            if guild_id is not None:
+                query = query.eq("guild_id", guild_id)
+            response = query.order("created_at").order("id").range(offset, offset + page_size - 1).execute()
+            batch = getattr(response, "data", None) or []
+            rows.extend(batch)
+            if len(batch) < page_size:
+                return rows
+            offset += page_size
+
+    def find_active_poll(self, guild_id: int, message_id: int) -> Optional[dict]:
+        response = (self.client.table("polls").select("*").eq("guild_id", guild_id)
+                    .eq("message_id", message_id).eq("ended", False).limit(1).execute())
+        rows = getattr(response, "data", None) or []
+        return rows[0] if rows else None
+
+    def find_poll_by_message(self, guild_id: int, message_id: int) -> Optional[dict]:
+        response = (self.client.table("polls").select("*").eq("guild_id", guild_id)
+                    .eq("message_id", message_id).limit(1).execute())
+        rows = getattr(response, "data", None) or []
+        return rows[0] if rows else None
+
+    def cast_poll_vote(self, poll_id: str, user_id: int, option_ids: list[int]) -> None:
+        self.client.rpc("cast_poll_vote", {
+            "p_poll_id": poll_id,
+            "p_user_id": user_id,
+            "p_option_ids": option_ids,
+        }).execute()
+
+    def get_poll_counts(self, poll_id: str) -> dict[int, int]:
+        counts: dict[int, int] = {}
+        offset = 0
+        page_size = 1000
+        while True:
+            response = (self.client.table("poll_votes").select("user_id,option_id")
+                        .eq("poll_id", poll_id).order("user_id").order("option_id")
+                        .range(offset, offset + page_size - 1).execute())
+            batch = getattr(response, "data", None) or []
+            for row in batch:
+                option_id = int(row["option_id"])
+                counts[option_id] = counts.get(option_id, 0) + 1
+            if len(batch) < page_size:
+                return counts
+            offset += page_size
+
+    def get_poll_vote_rows(self, poll_id: str) -> list[dict]:
+        rows: list[dict] = []
+        offset = 0
+        page_size = 1000
+        while True:
+            response = (self.client.table("poll_votes").select("user_id,option_id")
+                        .eq("poll_id", poll_id).order("user_id").order("option_id")
+                        .range(offset, offset + page_size - 1).execute())
+            batch = getattr(response, "data", None) or []
+            rows.extend(batch)
+            if len(batch) < page_size:
+                return rows
+            offset += page_size
+
+    def end_poll(self, poll_id: str, ended_at: str) -> None:
+        self.client.table("polls").update({"ended": True, "ended_at": ended_at}).eq("id", poll_id).execute()
+
+    def set_poll_message(self, poll_id: str, message_id: int) -> None:
+        self.client.table("polls").update({"message_id": message_id}).eq("id", poll_id).execute()
+
+    def list_poll_templates(self, guild_id: int) -> list[dict]:
+        response = (self.client.table("poll_embed_templates").select("*")
+                    .eq("guild_id", guild_id).order("created_at", desc=True).execute())
+        return getattr(response, "data", None) or []
+
+    def save_poll_template(self, template: dict) -> dict:
+        response = self.client.table("poll_embed_templates").insert(template).execute()
+        rows = getattr(response, "data", None) or []
+        return rows[0] if rows else template
+
+    def delete_poll_template(self, guild_id: int, template_id: str) -> None:
+        self.client.table("poll_embed_templates").delete().eq("guild_id", guild_id).eq("id", template_id).execute()
+
     def get_voice_seconds_since(self, guild_id: int, user_id: int, since_iso: str) -> int:
         response = (
             self.client.table("fact_voice_session")

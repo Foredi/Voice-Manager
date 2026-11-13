@@ -21,6 +21,114 @@ create table if not exists public.voice_presence (
     channel_id bigint not null
 );
 
+create table if not exists public.polls (
+    id uuid primary key,
+    guild_id bigint not null,
+    channel_id bigint not null,
+    message_id bigint,
+    creator_id bigint not null,
+    creator_name text not null,
+    question text not null,
+    description text,
+    embed_title text,
+    embed_color integer not null default 14198783,
+    thumbnail_url text,
+    image_url text,
+    author_name text,
+    author_icon_url text,
+    footer_text text,
+    footer_icon_url text,
+    single_choice boolean not null default true,
+    ends_at timestamptz,
+    ended boolean not null default false,
+    ended_at timestamptz,
+    created_at timestamptz not null default now()
+);
+alter table public.polls add column if not exists embed_title text;
+alter table public.polls add column if not exists embed_color integer not null default 14198783;
+alter table public.polls add column if not exists thumbnail_url text;
+alter table public.polls add column if not exists image_url text;
+alter table public.polls add column if not exists author_name text;
+alter table public.polls add column if not exists author_icon_url text;
+alter table public.polls add column if not exists footer_text text;
+alter table public.polls add column if not exists footer_icon_url text;
+create table if not exists public.poll_embed_templates (
+    id uuid primary key default gen_random_uuid(),
+    guild_id bigint not null,
+    owner_id bigint not null,
+    name text not null,
+    embed_title text,
+    description text,
+    embed_color integer not null default 14198783,
+    thumbnail_url text,
+    image_url text,
+    author_name text,
+    author_icon_url text,
+    footer_text text,
+    footer_icon_url text,
+    created_at timestamptz not null default now(),
+    unique (guild_id, name)
+);
+alter table public.poll_embed_templates add column if not exists author_name text;
+alter table public.poll_embed_templates add column if not exists author_icon_url text;
+alter table public.poll_embed_templates add column if not exists footer_text text;
+alter table public.poll_embed_templates add column if not exists footer_icon_url text;
+create index if not exists idx_poll_templates_guild on public.poll_embed_templates(guild_id, created_at desc);
+create index if not exists idx_polls_active_expiry on public.polls(ends_at) where ended = false;
+create index if not exists idx_polls_channel_active on public.polls(guild_id, channel_id, created_at desc) where ended = false;
+
+create table if not exists public.poll_options (
+    id bigint generated always as identity primary key,
+    poll_id uuid not null references public.polls(id) on delete cascade,
+    position integer not null,
+    label text not null,
+    emoji text,
+    unique(poll_id, position)
+);
+create table if not exists public.poll_votes (
+    poll_id uuid not null references public.polls(id) on delete cascade,
+    user_id bigint not null,
+    option_id bigint not null references public.poll_options(id) on delete cascade,
+    created_at timestamptz not null default now(),
+    primary key(poll_id, user_id, option_id)
+);
+create index if not exists idx_poll_votes_option on public.poll_votes(poll_id, option_id);
+
+-- A vote replacement is one transaction and validates poll state and option ownership.
+create or replace function public.cast_poll_vote(
+    p_poll_id uuid,
+    p_user_id bigint,
+    p_option_ids bigint[]
+)
+returns void
+language plpgsql
+security definer
+set search_path = pg_catalog, public
+as $$
+declare
+    poll_record public.polls%rowtype;
+begin
+    select * into poll_record from public.polls where id = p_poll_id for update;
+    if not found or poll_record.ended or (poll_record.ends_at is not null and poll_record.ends_at <= now()) then
+        raise exception 'poll is closed';
+    end if;
+    if poll_record.single_choice and coalesce(array_length(p_option_ids, 1), 0) > 1 then
+        raise exception 'poll accepts one option';
+    end if;
+    if exists (
+        select 1 from unnest(coalesce(p_option_ids, '{}'::bigint[])) requested(id)
+        left join public.poll_options option_row on option_row.id = requested.id and option_row.poll_id = p_poll_id
+        where option_row.id is null
+    ) then
+        raise exception 'invalid option';
+    end if;
+    delete from public.poll_votes where poll_id = p_poll_id and user_id = p_user_id;
+    insert into public.poll_votes(poll_id, user_id, option_id)
+    select p_poll_id, p_user_id, selected.id
+    from (select distinct unnest(coalesce(p_option_ids, '{}'::bigint[])) as id) selected;
+end;
+$$;
+
 create table if not exists public.room_name_preferences (
     guild_id bigint not null,
     user_id bigint not null,

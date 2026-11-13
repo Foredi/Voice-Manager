@@ -14,6 +14,8 @@ from app.core.discord_utils import post_webhook, report_error, notify_room_limit
 from app.features.rooms.ui import RoomControlView, build_room_embed
 from app.features.voicemaster.commands import RoomGroup, VoiceMasterGroup
 from app.features.voice_activity.presentation import add_interval_to_hourly
+from app.features.polls.commands import PollGroup
+from app.features.polls.ui import PollVoteView, poll_embed
 
 class PermanentVoiceMaster(commands.Bot):
     def __init__(self):
@@ -32,6 +34,207 @@ class PermanentVoiceMaster(commands.Bot):
         self._last_room_create: dict[tuple[int, int], float] = {}
         self._voice_sessions: dict[tuple[int, int], float] = {}
         self._voice_session_channels: dict[tuple[int, int], int] = {}
+        self._poll_expiry_task: Optional[asyncio.Task] = None
+        self._poll_views_registered: set[str] = set()
+        self._poll_cache: dict[str, dict] = {}
+        self._poll_vote_cache: dict[str, dict[int, set[int]]] = {}
+        self._poll_counts_cache: dict[str, dict[int, int]] = {}
+        self._poll_cache_locks: dict[str, asyncio.Lock] = {}
+        # The SQL RPC also row-locks the poll; use one writer lock per poll to
+        # avoid flooding Postgres with a burst of simultaneous interactions.
+        self._poll_write_locks: dict[str, asyncio.Lock] = {}
+        self._poll_persist_tasks: dict[asyncio.Task, str] = {}
+        self._poll_message_locks: dict[str, asyncio.Lock] = {}
+
+    async def create_poll_record(
+        self, interaction, question, labels, emojis, single_choice, minutes,
+        embed_title=None, description=None, embed_color=0xD8A7FF,
+        thumbnail_url=None, image_url=None, author_name=None, author_icon_url=None,
+        footer_text=None, footer_icon_url=None,
+    ):
+        import uuid
+        poll_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc)
+        ends_at = datetime.fromtimestamp(now.timestamp() + minutes * 60, timezone.utc).isoformat() if minutes else None
+        poll = {
+            "id": poll_id, "guild_id": interaction.guild.id,
+            "channel_id": interaction.channel.id, "message_id": None,
+            "creator_id": interaction.user.id, "creator_name": interaction.user.display_name,
+            "question": question,
+            "embed_title": embed_title, "description": description,
+            "embed_color": embed_color, "thumbnail_url": thumbnail_url, "image_url": image_url,
+            "author_name": author_name, "author_icon_url": author_icon_url,
+            "footer_text": footer_text, "footer_icon_url": footer_icon_url,
+            "single_choice": single_choice, "ends_at": ends_at,
+            "ended": False, "ended_at": None,
+        }
+        options = [{"poll_id": poll_id, "position": index, "label": label[:100],
+                    "emoji": emojis[index][:100] if index < len(emojis) and emojis[index] else None}
+                   for index, label in enumerate(labels)]
+        await asyncio.to_thread(self.db.create_poll, poll, options)
+        return poll_id
+
+    async def get_poll(self, poll_id):
+        return await asyncio.to_thread(self.db.get_poll, poll_id)
+
+    async def find_active_poll(self, guild_id, channel_id):
+        poll = await asyncio.to_thread(self.db.find_active_poll, guild_id, channel_id)
+        if poll:
+            poll["options"] = (await asyncio.to_thread(self.db.get_poll, poll["id"]))["options"]
+        return poll
+
+    async def get_poll_for_message(self, guild_id, message_id):
+        poll = await asyncio.to_thread(self.db.find_poll_by_message, guild_id, message_id)
+        if poll:
+            details = await self.get_poll(poll["id"])
+            return details
+        return None
+
+    async def list_active_polls(self, guild_id=None):
+        return await asyncio.to_thread(self.db.list_active_polls, guild_id)
+
+    async def set_poll_vote(self, poll_id, user_id, option_ids):
+        await asyncio.to_thread(self.db.cast_poll_vote, poll_id, user_id, option_ids)
+
+    async def prime_poll_cache(self, poll: dict) -> None:
+        poll_id = str(poll["id"])
+        rows = await asyncio.to_thread(self.db.get_poll_vote_rows, poll_id)
+        votes: dict[int, set[int]] = {}
+        counts: dict[int, int] = {}
+        for row in rows:
+            user_id, option_id = int(row["user_id"]), int(row["option_id"])
+            votes.setdefault(user_id, set()).add(option_id)
+            counts[option_id] = counts.get(option_id, 0) + 1
+        self._poll_cache[poll_id] = poll
+        self._poll_vote_cache[poll_id] = votes
+        self._poll_counts_cache[poll_id] = counts
+
+    async def optimistic_poll_vote(self, poll_id: str, user_id: int, option_ids: list[int]) -> dict[int, int]:
+        lock = self._poll_cache_locks.setdefault(poll_id, asyncio.Lock())
+        async with lock:
+            votes = self._poll_vote_cache.setdefault(poll_id, {})
+            counts = self._poll_counts_cache.setdefault(poll_id, {})
+            previous = votes.get(user_id, set())
+            selected = set(option_ids)
+            for option_id in previous - selected:
+                counts[option_id] = max(0, counts.get(option_id, 0) - 1)
+            for option_id in selected - previous:
+                counts[option_id] = counts.get(option_id, 0) + 1
+            votes[user_id] = selected
+            return dict(counts)
+
+    def queue_poll_vote_persist(self, poll_id: str, user_id: int) -> None:
+        task = asyncio.create_task(self._persist_poll_vote(poll_id, user_id))
+        self._poll_persist_tasks[task] = poll_id
+        task.add_done_callback(self._poll_persist_tasks.pop)
+
+    async def update_poll_message_fast(self, message, poll: dict) -> bool:
+        poll_id = str(poll["id"])
+        lock = self._poll_message_locks.setdefault(poll_id, asyncio.Lock())
+        async with lock:
+            current_poll = self._poll_cache.get(poll_id, poll)
+            if current_poll.get("ended"):
+                return False
+            counts = dict(self._poll_counts_cache.get(poll_id, {}))
+            await message.edit(
+                embed=poll_embed(current_poll, counts, current_poll.get("creator_name")),
+                view=PollVoteView(current_poll),
+            )
+            return True
+
+    async def wait_poll_persist(self, poll_id: str) -> None:
+        while True:
+            pending = [task for task, task_poll_id in self._poll_persist_tasks.items() if task_poll_id == poll_id]
+            if not pending:
+                return
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    async def _persist_poll_vote(self, poll_id: str, user_id: int) -> None:
+        lock = self._poll_write_locks.setdefault(poll_id, asyncio.Lock())
+        async with lock:
+            selected = sorted(self._poll_vote_cache.get(poll_id, {}).get(user_id, set()))
+            for attempt in range(6):
+                try:
+                    await asyncio.to_thread(self.db.cast_poll_vote, poll_id, user_id, selected)
+                    return
+                except Exception as exc:
+                    message = str(exc).lower()
+                    if "poll is closed" in message or "invalid option" in message:
+                        log.warning("Poll vote rejected by database poll=%s user=%s: %s", poll_id, user_id, exc)
+                        return
+                    if attempt == 5:
+                        log.exception("Failed to persist poll vote poll=%s user=%s", poll_id, user_id)
+                        await report_error(f"persist poll vote poll {poll_id}, user {user_id}", exc)
+                    else:
+                        await asyncio.sleep(min(0.5 * (2 ** attempt), 8))
+
+    async def close(self) -> None:
+        await super().close()
+        deadline = asyncio.get_running_loop().time() + 20
+        while self._poll_persist_tasks:
+            pending = list(self._poll_persist_tasks)
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                log.warning("Bot shutdown with %s poll vote writes still pending", len(pending))
+                break
+            try:
+                await asyncio.wait_for(asyncio.gather(*pending, return_exceptions=True), timeout=remaining)
+            except asyncio.TimeoutError:
+                log.warning("Bot shutdown with %s poll vote writes still pending", len(self._poll_persist_tasks))
+                break
+
+    async def save_poll_message(self, poll_id, message_id):
+        await asyncio.to_thread(self.db.set_poll_message, poll_id, message_id)
+
+    async def list_poll_templates(self, guild_id):
+        return await asyncio.to_thread(self.db.list_poll_templates, guild_id)
+
+    async def save_poll_template(self, template):
+        return await asyncio.to_thread(self.db.save_poll_template, template)
+
+    async def delete_poll_template(self, guild_id, template_id):
+        await asyncio.to_thread(self.db.delete_poll_template, guild_id, template_id)
+
+    async def refresh_poll_message(self, poll_id):
+        poll = await self.get_poll(poll_id)
+        if not poll:
+            return False
+        counts = await asyncio.to_thread(self.db.get_poll_counts, poll_id)
+        self._poll_cache[poll_id] = poll
+        self._poll_counts_cache[poll_id] = counts
+        channel = self.get_channel(int(poll["channel_id"]))
+        if channel is None:
+            try:
+                channel = await self.fetch_channel(int(poll["channel_id"]))
+            except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+                return False
+        try:
+            message = await channel.fetch_message(int(poll["message_id"]))
+            lock = self._poll_message_locks.setdefault(str(poll_id), asyncio.Lock())
+            async with lock:
+                await message.edit(embed=poll_embed(poll, counts, poll.get("creator_name")), view=None if poll["ended"] else PollVoteView(poll))
+            return True
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return False
+
+    async def finish_poll(self, poll_id):
+        poll = await self.get_poll(poll_id)
+        if poll and not poll["ended"]:
+            await self.wait_poll_persist(str(poll_id))
+            await asyncio.to_thread(self.db.end_poll, poll_id, datetime.now(timezone.utc).isoformat())
+        await self.refresh_poll_message(poll_id)
+
+    async def _poll_expiry_loop(self):
+        while not self.is_closed():
+            try:
+                active = await asyncio.to_thread(self.db.list_active_polls)
+                now = datetime.now(timezone.utc)
+                for row in active:
+                    if row.get("ends_at") and datetime.fromisoformat(row["ends_at"].replace("Z", "+00:00")) <= now:
+                        await self.finish_poll(row["id"])
+            except Exception as exc:
+                await report_error("poll expiry scan", exc)
+            await asyncio.sleep(15)
 
     def get_cached_settings(self, guild_id: int):
         # Cache is loaded when the bot becomes ready and updated by /setup.
@@ -186,15 +389,37 @@ class PermanentVoiceMaster(commands.Bot):
     async def setup_hook(self) -> None:
         self.tree.add_command(VoiceMasterGroup())
         self.tree.add_command(RoomGroup())
+        self.tree.add_command(PollGroup())
         self.add_view(RoomControlView())
         synced = await self.tree.sync()
         self._voice_heartbeat_task = asyncio.create_task(self._voice_heartbeat_loop())
+        self._poll_expiry_task = asyncio.create_task(self._poll_expiry_loop())
         log.info("Synced %s application commands", len(synced))
         log.info("Connected to Supabase database")
 
     async def on_ready(self) -> None:
         log.info("Logged in as %s (%s)", self.user, self.user.id if self.user else "unknown")
         await asyncio.gather(*(self._load_guild_cache(guild.id) for guild in self.guilds))
+        try:
+            active_polls = await asyncio.to_thread(self.db.list_active_polls)
+            for poll_row in active_polls:
+                poll = await self.get_poll(poll_row["id"])
+                if poll:
+                    poll_id = str(poll["id"])
+                    if poll_id in self._poll_vote_cache:
+                        # on_ready can run again after a gateway reconnect. Keep
+                        # optimistic votes whose background writes may still be pending.
+                        self._poll_cache[poll_id] = poll
+                    else:
+                        await self.prime_poll_cache(poll)
+                if poll and poll["message_id"] and poll["id"] not in self._poll_views_registered:
+                    if poll["ends_at"] and datetime.fromisoformat(poll["ends_at"].replace("Z", "+00:00")) <= datetime.now(timezone.utc):
+                        await self.finish_poll(poll["id"])
+                    else:
+                        self.add_view(PollVoteView(poll), message_id=int(poll["message_id"]))
+                    self._poll_views_registered.add(poll["id"])
+        except Exception as exc:
+            await report_error("restore poll views", exc)
         saved_rooms, saved_voice_channels = await asyncio.gather(
             asyncio.to_thread(self.db.get_rooms),
             asyncio.to_thread(self.db.get_voice_channels),
