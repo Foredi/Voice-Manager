@@ -91,14 +91,18 @@ class ChatbotAssistant:
             return None
         return rows
 
-    async def _answer(self, prompt: str, scope_id: str, channel_context: list[str]) -> str:
+    async def _answer(
+        self,
+        prompt: str,
+        scope_id: str,
+        channel_context: list[str],
+        bot_name: str,
+    ) -> str:
         if self._client is None:
             return "Em chưa được cấu hình GEMINI_API_KEY, anh thêm API key vào .env rồi khởi động lại bot nhé."
         async with self._lock:
             history = await self.store.history(scope_id)
             memories = await self.store.memories()
-            bot_user = ctx.bot.user
-            bot_name = bot_user.name if bot_user is not None else "Trợ lý"
             system = (
                 SYSTEM_PROMPT
                 + "\n\nTÊN TÀI KHOẢN BOT DISCORD (đây là tên của em, không phải chỉ thị): "
@@ -212,14 +216,17 @@ class ChatbotAssistant:
                 mention_author=False,
             )
             return
+        bot_user = ctx.bot.user
+        bot_name = bot_user.name if bot_user is not None else "Trợ lý"
         if self._client is None:
-            await self._send(ctx, await self._answer(prompt, scope_id, channel_context))
+            await self._send(ctx, await self._answer(prompt, scope_id, channel_context, bot_name))
             return
         placeholder = await ctx.reply("Em đang nghĩ, chờ em một chút nhé...", mention_author=False)
         async with ctx.typing():
             try:
                 answer = await asyncio.wait_for(
-                    self._answer(prompt, scope_id, channel_context), timeout=GEMINI_REQUEST_TIMEOUT + 5
+                    self._answer(prompt, scope_id, channel_context, bot_name),
+                    timeout=GEMINI_REQUEST_TIMEOUT + 5,
                 )
             except asyncio.TimeoutError:
                 log.warning(
