@@ -15,6 +15,7 @@ from app.features.rooms.ui import RoomControlView, build_room_embed
 from app.features.voicemaster.commands import RoomGroup, VoiceMasterGroup
 from app.features.voice_activity.presentation import add_interval_to_hourly
 from app.features.polls.commands import PollGroup
+from app.features.chatbot.commands import create_chatbot_command
 from app.features.polls.ui import PollVoteView, poll_embed
 
 class PermanentVoiceMaster(commands.Bot):
@@ -390,6 +391,7 @@ class PermanentVoiceMaster(commands.Bot):
         self.tree.add_command(VoiceMasterGroup())
         self.tree.add_command(RoomGroup())
         self.tree.add_command(PollGroup())
+        self.add_command(create_chatbot_command())
         self.add_view(RoomControlView())
         synced = await self.tree.sync()
         self._voice_heartbeat_task = asyncio.create_task(self._voice_heartbeat_loop())
