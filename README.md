@@ -21,7 +21,7 @@ A Discord bot that automatically creates a personal voice channel when a member 
 - `/room panel` opens an embed dashboard for the room the user is currently in. Dropdowns edit the room name, user limit, lock state, and visibility; buttons refresh the panel, transfer ownership, or delete the room.
 - `/room claim` lets a member claim a room if its previous owner has left the server; admins can also claim it.
 - `ret voice_time` shows your personal dashboard with a smooth PNG chart for voice minutes and session starts by hour, time totals for 1, 7, and 14 days, your top rooms over the last 30 days, and the top 5 people whose voice sessions overlapped with yours in the same room. Add `@member` to view another member.
-- `ret chatbot <message>` chats with the AI assistant in the current server channel. Only the Discord application owner can use it, and they also need Manage Server in that server. History is isolated per server and channel; up to 100 recent turns are retained per channel, with long-term memories extracted every 10 messages. `ret chatbot memory`, `ret chatbot forget`, and `ret chatbot reset` view/delete memories or the current channel's history. Replies are visible to members who can read the channel.
+- `ret chatbot <message>` chats with the AI assistant in the current server channel. Only the Discord application owner can use it, and they also need Manage Server in that server. It reads the latest 12 channel messages (configurable with `CHATBOT_CHANNEL_CONTEXT_MESSAGES`) and labels each with its speaker so it can distinguish members. History is isolated per server and channel; up to 100 recent turns are retained per channel. Long-term memories are extracted every 10 chatbot turns from the owner's direct prompts only, never from the AI's replies or other members' messages. `ret chatbot memory`, `ret chatbot forget`, and `ret chatbot reset` view/delete memories or the current channel's history. Replies are visible to members who can read the channel.
 - Voice sessions are stored as durable warehouse facts with guild, member, and room dimensions. Open sessions are heartbeated and resumed after restarts; departed members and deleted rooms do not erase history. `Matplotlib` renders the chart image.
 - `/room restore owner:<member>` lets an administrator restore management for an existing room and repost its control embed if its database record was lost.
 - `/room delete` deletes the current room after confirmation.
@@ -32,7 +32,7 @@ A Discord bot that automatically creates a personal voice channel when a member 
 
 - Python 3.10+
 - A Discord application and bot
-- Bot permissions: **Manage Channels**, **Move Members**, **View Channels**, **Connect**, **Send Messages**, **Embed Links**, **Set Voice Channel Status**. Manage Server is required for setup and voice configuration commands.
+- Bot permissions: **Manage Channels**, **Move Members**, **View Channels**, **Read Message History**, **Connect**, **Send Messages**, **Embed Links**, **Set Voice Channel Status**. Read Message History lets `ret chatbot` use recent channel context. Manage Server is required for setup and voice configuration commands.
 - Put the bot's highest role above members it needs to move. Discord does not let the bot move the server owner; for the owner, VoiceMaster creates the room and sends a link to join it manually.
 - Enable **Server Members Intent** and **Message Content Intent** in the Discord Developer Portal (Bot page), as this project uses member and prefix commands.
 

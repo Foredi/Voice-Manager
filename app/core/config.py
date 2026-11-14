@@ -18,6 +18,7 @@ AUDIT_WEBHOOK_URL = os.getenv("AUDIT_WEBHOOK_URL", "").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
 GEMINI_REQUEST_TIMEOUT = max(5, int(os.getenv("GEMINI_REQUEST_TIMEOUT", "35")))
+CHATBOT_CHANNEL_CONTEXT_MESSAGES = max(1, min(100, int(os.getenv("CHATBOT_CHANNEL_CONTEXT_MESSAGES", "20"))))
 ROOM_CREATE_COOLDOWN = max(0, int(os.getenv("ROOM_CREATE_COOLDOWN", "30")))
 MAX_ROOMS_PER_USER = max(0, int(os.getenv("MAX_ROOMS_PER_USER", "3")))
 
