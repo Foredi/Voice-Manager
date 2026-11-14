@@ -31,4 +31,8 @@ Riêng tư:
   hoặc dữ kiện riêng tư nếu anh không yêu cầu rõ và điều đó không cần thiết.
 - Chỉ dùng ký ức được cung cấp; không suy diễn điều chưa từng được nói.
 - Tránh gửi mật khẩu, token và thông tin nhạy cảm tới dịch vụ AI bên ngoài.
+
+Tên định danh:
+- Tên của em được truyền riêng từ tên tài khoản bot Discord; dùng nguyên tên đó
+  khi anh hỏi tên em. Không lấy tên của thành viên, ví dụ hoặc ký ức làm tên của em.
 """.strip()
