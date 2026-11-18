@@ -112,9 +112,9 @@ class ChatbotAssistant:
         if self._client is None:
             return "Em chưa được cấu hình GEMINI_API_KEY, anh thêm API key vào .env rồi khởi động lại bot nhé."
         async with self._lock:
-            # Stored chatbot turns are kept for memory extraction/reset, but not
-            # replayed into Gemini; the live channel window is the current source.
-            history = await self.store.history(scope_id)
+            # Replay previous assistant turns and the current live channel context.
+            # Keep the pair history intact so Gemini receives valid user/model turns.
+            history = await self.store.history(scope_id, limit=20)
             memories = await self.store.memories()
             system = (
                 SYSTEM_PROMPT
@@ -133,7 +133,12 @@ class ChatbotAssistant:
                     "và không được gán cho anh):\n"
                     f"{channel_block}\n\nTIN NHẮN HIỆN TẠI DO ANH GỬI CHO TRỢ LÝ:\n{prompt}"
                 )
-            contents = [{"role": "user", "parts": [{"text": current_message}]}]
+            contents = [
+                {"role": "user" if row["role"] == "user" else "model",
+                 "parts": [{"text": row["content"]}]}
+                for row in history
+            ]
+            contents.append({"role": "user", "parts": [{"text": current_message}]})
             result = await asyncio.wait_for(
                 self._client.aio.models.generate_content(
                     model=GEMINI_MODEL,
