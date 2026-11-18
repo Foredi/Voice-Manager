@@ -28,6 +28,20 @@ class Database:
         rows = getattr(response, "data", None) or []
         return rows[0] if rows else None
 
+    def set_auto_message(self, row: dict) -> None:
+        self.client.table("auto_messages").upsert(row, on_conflict="guild_id").execute()
+
+    def get_auto_message(self, guild_id: int):
+        response = self.client.table("auto_messages").select("*").eq("guild_id", guild_id).limit(1).execute()
+        rows = getattr(response, "data", None) or []
+        return rows[0] if rows else None
+
+    def list_auto_messages(self) -> list[dict]:
+        return getattr(self.client.table("auto_messages").select("*").execute(), "data", None) or []
+
+    def set_auto_message_id(self, guild_id: int, message_id: int | None) -> None:
+        self.client.table("auto_messages").update({"message_id": message_id}).eq("guild_id", guild_id).execute()
+
     def set_voice_channel(self, guild_id: int, channel_id: int) -> None:
         self.client.table("voice_presence").upsert(
             {"guild_id": guild_id, "channel_id": channel_id}, on_conflict="guild_id"

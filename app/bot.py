@@ -16,9 +16,10 @@ from app.features.voicemaster.commands import RoomGroup, VoiceMasterGroup
 from app.features.voice_activity.presentation import add_interval_to_hourly
 from app.features.polls.commands import PollGroup
 from app.features.chatbot.commands import create_chatbot_command
+from app.features.auto_message import AutoMessageGroup, AutoMessageManager
 from app.features.polls.ui import PollVoteView, poll_embed
 
-class PermanentVoiceMaster(commands.Bot):
+class PermanentVoiceMaster(AutoMessageManager, commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.voice_states = True
@@ -27,6 +28,7 @@ class PermanentVoiceMaster(commands.Bot):
         super().__init__(command_prefix="ret", intents=intents)
         self.db = Database(SUPABASE_URL, SUPABASE_KEY)
         self._trigger_attempts: set[tuple[int, int]] = set()
+        self._init_auto_messages()
         self._settings_cache: dict[int, Optional[dict]] = {}
         self._room_name_cache: dict[tuple[int, int], Optional[str]] = {}
         self._room_names_loaded: set[int] = set()
@@ -391,6 +393,7 @@ class PermanentVoiceMaster(commands.Bot):
         self.tree.add_command(VoiceMasterGroup())
         self.tree.add_command(RoomGroup())
         self.tree.add_command(PollGroup())
+        self.tree.add_command(AutoMessageGroup())
         self.add_command(create_chatbot_command())
         self.add_view(RoomControlView())
         synced = await self.tree.sync()
@@ -402,6 +405,7 @@ class PermanentVoiceMaster(commands.Bot):
     async def on_ready(self) -> None:
         log.info("Logged in as %s (%s)", self.user, self.user.id if self.user else "unknown")
         await asyncio.gather(*(self._load_guild_cache(guild.id) for guild in self.guilds))
+        await self.restore_auto_messages()
         try:
             active_polls = await asyncio.to_thread(self.db.list_active_polls)
             for poll_row in active_polls:
@@ -450,6 +454,10 @@ class PermanentVoiceMaster(commands.Bot):
                 await post_webhook(ERROR_WEBHOOK_URL, f"**VoiceMaster voice reconnect failed**\nGuild `{guild.id}`, channel `{channel.id}`. Check View Channel and Connect permissions.")
         await self._cleanup_stale_rooms()
         await self._create_rooms_for_waiting_members()
+
+    async def on_message(self, message: discord.Message) -> None:
+        await self.handle_auto_message(message)
+        await self.process_commands(message)
 
         observed: dict[tuple[int, int], tuple[discord.Member, discord.VoiceChannel]] = {}
         for guild in self.guilds:

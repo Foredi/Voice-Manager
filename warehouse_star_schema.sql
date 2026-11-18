@@ -21,6 +21,16 @@ create table if not exists public.voice_presence (
     channel_id bigint not null
 );
 
+create table if not exists public.auto_messages (
+    guild_id bigint primary key,
+    channel_id bigint not null,
+    content text not null,
+    delay_seconds integer not null default 60 check (delay_seconds between 5 and 86400),
+    enabled boolean not null default true,
+    message_id bigint,
+    updated_at timestamptz not null default now()
+);
+
 create table if not exists public.polls (
     id uuid primary key,
     guild_id bigint not null,
